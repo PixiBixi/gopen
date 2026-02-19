@@ -50,7 +50,7 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
@@ -84,7 +84,7 @@ brews:
       owner: "{{ .Env.GITHUB_REPOSITORY_OWNER }}"
       name: homebrew-tap
       token: "{{ .Env.GITHUB_TOKEN }}"
-    folder: Formula
+    directory: Formula
     homepage: "https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/gopen"
     description: "Open your git repository in the browser at the current branch and directory"
     license: "MIT"
