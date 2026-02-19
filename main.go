@@ -56,6 +56,12 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
 			os.Exit(1)
 		}
+
+		// When called via git alias, git changes cwd to repo root
+		// but sets GIT_PREFIX to the original relative path
+		if gitPrefix := os.Getenv("GIT_PREFIX"); gitPrefix != "" {
+			targetPath = filepath.Join(targetPath, gitPrefix)
+		}
 	}
 
 	// Check if path exists
@@ -79,7 +85,7 @@ func main() {
 	}
 
 	// Get git remote URL
-	remoteURL, err := getGitRemoteURL(*remoteName)
+	remoteURL, err := getGitRemoteURL(*remoteName, checkDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting git remote URL: %v\n", err)
 		os.Exit(1)
@@ -89,14 +95,14 @@ func main() {
 	httpsURL := convertToHTTPS(remoteURL)
 
 	// Get current branch
-	branch, err := getCurrentBranch()
+	branch, err := getCurrentBranch(checkDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting current branch: %v\n", err)
 		os.Exit(1)
 	}
 
 	// Get repository root
-	repoRoot, err := getRepoRoot()
+	repoRoot, err := getRepoRoot(checkDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting repository root: %v\n", err)
 		os.Exit(1)
@@ -136,8 +142,9 @@ func isGitRepo(dir string) bool {
 }
 
 // getGitRemoteURL gets the URL of the specified remote
-func getGitRemoteURL(remoteName string) (string, error) {
+func getGitRemoteURL(remoteName, dir string) (string, error) {
 	cmd := exec.Command("git", "remote", "get-url", remoteName)
+	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get remote URL for '%s': %w", remoteName, err)
@@ -146,8 +153,9 @@ func getGitRemoteURL(remoteName string) (string, error) {
 }
 
 // getCurrentBranch gets the current git branch name
-func getCurrentBranch() (string, error) {
+func getCurrentBranch(dir string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
+	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get current branch: %w", err)
@@ -156,8 +164,9 @@ func getCurrentBranch() (string, error) {
 }
 
 // getRepoRoot gets the root directory of the git repository
-func getRepoRoot() (string, error) {
+func getRepoRoot(dir string) (string, error) {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
 	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get repo root: %w", err)
