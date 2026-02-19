@@ -1,0 +1,33 @@
+repos:
+  # Hooks génériques
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  # Hooks Go
+  - repo: https://github.com/tekwizely/pre-commit-golang
+    rev: v1.0.0-rc.1
+    hooks:
+      # go fmt
+      - id: go-fmt
+        args: [-w]
+
+      # go vet
+      - id: go-vet-repo-mod
+
+      # go mod tidy
+      - id: go-mod-tidy-repo
+
+      # go build
+      - id: go-build-repo-mod
+
+      # staticcheck
+      - id: go-staticcheck-repo-mod
+
+      # golangci-lint (optionnel, commenté car peut être lourd)
+      # - id: golangci-lint-repo-mod

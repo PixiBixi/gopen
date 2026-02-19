@@ -1,0 +1,26 @@
+# Binaries
+gopen
+gopen-*
+*.exe
+
+# Go
+*.o
+*.a
+*.so
+*.test
+*.out
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# GoReleaser
+dist/
