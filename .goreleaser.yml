@@ -72,8 +72,8 @@ changelog:
 
 release:
   github:
-    owner: "{{ .Env.GITHUB_REPOSITORY_OWNER }}"
-    name: "{{ .ProjectName }}"
+    owner: PixiBixi
+    name: gopen
   name_template: "{{.ProjectName}} {{.Version}}"
   draft: false
   prerelease: auto
