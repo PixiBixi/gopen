@@ -10,6 +10,7 @@ Open your git repository in the browser at the current branch and directory. Sim
 
 - 🚀 Opens the browser at the exact location (branch + directory/file)
 - 📁 **Open specific files**: Pass a file path as argument
+- 🔢 **Line numbers**: Jump to specific line or line range in files
 - 🔀 **Multiple remotes**: Choose which remote to open (origin, upstream, fork, etc.)
 - 📋 **Clipboard mode**: Copy URL instead of opening browser
 - 🔄 Converts git:// and ssh:// URLs to HTTPS automatically
@@ -74,9 +75,20 @@ gopen --remote fork
 gopen -c
 gopen --copy
 
+# Open file at specific line (all syntaxes work)
+gopen -l 42 main.go
+gopen main.go -l42
+gopen --line 100 src/lib/utils.go
+
+# Open file at line range
+gopen -l 42-50 main.go
+gopen main.go -l 42-50
+gopen --line 100-120 src/lib/utils.go
+
 # Combine options
-gopen main.go -r upstream -c
-gopen src/lib/utils.go --copy
+gopen -r upstream -c main.go
+gopen --copy src/lib/utils.go
+gopen -l 42 -c main.go
 
 # Show version
 gopen -v
@@ -107,7 +119,7 @@ gopen -r upstream
 
 ### Copy URL for sharing
 ```bash
-gopen src/main.go -c
+gopen -c src/main.go
 # → Output: URL copied to clipboard: https://github.com/user/repo/tree/main/src/main.go
 ```
 
@@ -126,6 +138,19 @@ gopen ../src/components/App.tsx
 # → Opens: https://github.com/user/my-repo/tree/main/src/components/App.tsx
 ```
 
+### Line numbers
+```bash
+# Open file at specific line (flexible syntax)
+gopen -l 42 main.go
+gopen main.go -l42
+# → Opens: https://github.com/user/my-repo/tree/main/main.go#L42
+
+# Open file at line range
+gopen -l 100-120 src/utils.go
+gopen src/utils.go -l 100-120
+# → Opens: https://github.com/user/my-repo/tree/main/src/utils.go#L100-L120
+```
+
 ## Git alias (recommended)
 
 Add to your git config for native-style usage:
@@ -138,6 +163,7 @@ Then use it like:
 ```bash
 git open
 git open main.go
+git open -l 42 main.go
 git open -r upstream
 ```
 

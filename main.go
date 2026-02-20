@@ -17,14 +17,73 @@ var (
 	date    = "unknown"
 )
 
+// reorderArgs reorders arguments to put all flags before positional arguments
+// This allows "gopen file.go -l 42" to work the same as "gopen -l 42 file.go"
+// Also handles flags with values attached like -l42 -> -l 42
+func reorderArgs(args []string) []string {
+	var flags []string
+	var positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "--") {
+			// Long flag like --line=42 or --line 42
+			if strings.Contains(arg, "=") {
+				flags = append(flags, arg)
+			} else {
+				flags = append(flags, arg)
+				// Check if next arg is the value
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					if arg == "--line" || arg == "--remote" {
+						i++
+						flags = append(flags, args[i])
+					}
+				}
+			}
+		} else if strings.HasPrefix(arg, "-") && len(arg) > 1 {
+			// Short flag like -l42 or -l 42
+			flagChar := arg[1:2]
+
+			// Boolean flags
+			if flagChar == "c" || flagChar == "v" {
+				flags = append(flags, arg)
+			} else if flagChar == "l" || flagChar == "r" {
+				// Flag with value - check if value is attached
+				if len(arg) > 2 {
+					// Value attached like -l42
+					flags = append(flags, "-"+flagChar, arg[2:])
+				} else {
+					// Separate value like -l 42
+					flags = append(flags, arg)
+					if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+						i++
+						flags = append(flags, args[i])
+					}
+				}
+			} else {
+				flags = append(flags, arg)
+			}
+		} else {
+			positional = append(positional, arg)
+		}
+	}
+
+	return append(flags, positional...)
+}
+
 func main() {
-	// Parse flags
+	// Parse flags - reorder args to support flags after positional arguments
+	args := reorderArgs(os.Args[1:])
+	os.Args = append([]string{os.Args[0]}, args...)
+
 	versionFlag := flag.Bool("version", false, "Print version information")
 	flag.BoolVar(versionFlag, "v", false, "Print version information (shorthand)")
 	remoteName := flag.String("remote", "origin", "Git remote name to use")
 	flag.StringVar(remoteName, "r", "origin", "Git remote name to use (shorthand)")
 	copyFlag := flag.Bool("copy", false, "Copy URL to clipboard instead of opening browser")
 	flag.BoolVar(copyFlag, "c", false, "Copy URL to clipboard instead of opening browser (shorthand)")
+	lineNumber := flag.String("line", "", "Line number or range (e.g., 42 or 42-50)")
+	flag.StringVar(lineNumber, "l", "", "Line number or range (shorthand)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -116,7 +175,7 @@ func main() {
 	}
 
 	// Build web URL
-	webURL := buildWebURL(httpsURL, branch, relPath)
+	webURL := buildWebURL(httpsURL, branch, relPath, *lineNumber)
 
 	// Copy to clipboard or open in browser
 	if *copyFlag {
@@ -203,71 +262,144 @@ func convertToHTTPS(url string) string {
 }
 
 // buildWebURL constructs the web URL for the repository
-func buildWebURL(baseURL, branch, relPath string) string {
+func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 	// Normalize relative path (empty or "." means root)
 	if relPath == "." || relPath == "" {
 		relPath = ""
 	}
 
+	var url string
+	var lineFragment string
+
+	// Parse line number to determine if it's a range
+	var startLine, endLine string
+	if lineNumber != "" {
+		parts := strings.Split(lineNumber, "-")
+		startLine = parts[0]
+		if len(parts) > 1 {
+			endLine = parts[1]
+		}
+	}
+
 	// Detect provider and build appropriate URL
 	switch {
 	case strings.Contains(baseURL, "github.com"):
-		// GitHub: https://github.com/user/repo/tree/branch/path
+		// GitHub: https://github.com/user/repo/tree/branch/path#L42 or #L42-L50
 		if relPath == "" {
-			return fmt.Sprintf("%s/tree/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/tree/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#L%s-L%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#L%s", startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "gitlab.com") || strings.Contains(baseURL, "gitlab"):
-		// GitLab: https://gitlab.com/user/repo/-/tree/branch/path
+		// GitLab: https://gitlab.com/user/repo/-/tree/branch/path#L42 or #L42-50
 		if relPath == "" {
-			return fmt.Sprintf("%s/-/tree/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/-/tree/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/-/tree/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/-/tree/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#L%s-%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#L%s", startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "bitbucket.org"):
-		// Bitbucket Cloud: https://bitbucket.org/user/repo/src/branch/path
+		// Bitbucket Cloud: https://bitbucket.org/user/repo/src/branch/path#lines-42 or #lines-42:50
 		if relPath == "" {
-			return fmt.Sprintf("%s/src/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/src/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#lines-%s:%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#lines-%s", startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "dev.azure.com") || strings.Contains(baseURL, "visualstudio.com"):
-		// Azure DevOps: https://dev.azure.com/org/project/_git/repo?version=GBbranch&path=/path
+		// Azure DevOps: https://dev.azure.com/org/project/_git/repo?version=GBbranch&path=/path&line=42&lineEnd=50
 		if relPath == "" {
-			return fmt.Sprintf("%s?version=GB%s", baseURL, branch)
+			url = fmt.Sprintf("%s?version=GB%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s?version=GB%s&path=/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s?version=GB%s&path=/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("&line=%s&lineEnd=%s&lineStartColumn=1&lineEndColumn=1", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("&line=%s&lineEnd=%s&lineStartColumn=1&lineEndColumn=1", startLine, startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "gitea"):
-		// Gitea: https://gitea.domain.com/user/repo/src/branch/path
+		// Gitea: https://gitea.domain.com/user/repo/src/branch/path#L42 or #L42-L50
 		if relPath == "" {
-			return fmt.Sprintf("%s/src/branch/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/src/branch/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/src/branch/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/src/branch/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#L%s-L%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#L%s", startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "gogs"):
-		// Gogs: https://gogs.domain.com/user/repo/src/branch/path
+		// Gogs: https://gogs.domain.com/user/repo/src/branch/path#L42 or #L42-L50
 		if relPath == "" {
-			return fmt.Sprintf("%s/src/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/src/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#L%s-L%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#L%s", startLine)
+			}
+		}
 
 	case strings.Contains(baseURL, "console.aws.amazon.com") || strings.Contains(baseURL, "codecommit"):
 		// AWS CodeCommit: Already HTTPS console URL
 		// Format: https://console.aws.amazon.com/codesuite/codecommit/repositories/repo/browse/refs/heads/branch/--/path
 		if relPath == "" {
-			return fmt.Sprintf("%s/browse/refs/heads/%s/--/", baseURL, branch)
+			url = fmt.Sprintf("%s/browse/refs/heads/%s/--/", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/browse/refs/heads/%s/--/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/browse/refs/heads/%s/--/%s", baseURL, branch, relPath)
+		// AWS CodeCommit doesn't support line anchors in the same way
 
 	default:
 		// Fallback to GitHub-style format
 		if relPath == "" {
-			return fmt.Sprintf("%s/tree/%s", baseURL, branch)
+			url = fmt.Sprintf("%s/tree/%s", baseURL, branch)
+		} else {
+			url = fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
 		}
-		return fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
+		if startLine != "" {
+			if endLine != "" {
+				lineFragment = fmt.Sprintf("#L%s-L%s", startLine, endLine)
+			} else {
+				lineFragment = fmt.Sprintf("#L%s", startLine)
+			}
+		}
 	}
+
+	return url + lineFragment
 }
 
 // openBrowser opens the URL in the default browser (cross-platform)
