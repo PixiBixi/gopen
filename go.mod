@@ -1,3 +1,3 @@
-module github.com/jeremy/gopen
+module github.com/PixiBixi/gopen
 
 go 1.26

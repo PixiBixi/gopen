@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `gopen` — a zero-dependency Go CLI that opens a Git repository in the browser at the exact branch + path (+ optional line number). Single binary, cross-platform.
 
-Module: `github.com/jeremy/gopen` | Go 1.26 | No external deps (stdlib only)
+Module: `github.com/PixiBixi/gopen` | Go 1.26 | No external deps (stdlib only)
 
 ## Commands
 
