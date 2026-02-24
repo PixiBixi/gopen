@@ -105,6 +105,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
 				os.Exit(1)
 			}
+			// When called via git alias, git changes cwd to repo root
+			// but sets GIT_PREFIX to the original relative path
+			if gitPrefix := os.Getenv("GIT_PREFIX"); gitPrefix != "" {
+				cwd = filepath.Join(cwd, gitPrefix)
+			}
 			targetPath = filepath.Join(cwd, targetPath)
 		}
 	} else {
