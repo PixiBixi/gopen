@@ -36,14 +36,20 @@ Pre-commit hooks run automatically: `fmt`, `vet`, `mod tidy`, `build`, `staticch
 
 Everything lives in `main.go` (~466 lines). The flow is strictly sequential:
 
-1. **`reorderArgs()`** — normalizes flexible flag placement (`gopen file.go -l42` → `gopen -l 42 file.go`)
-2. **Path resolution** — handles `GIT_PREFIX` (set when called via `git alias`)
+1. **`parseArgs()`** — custom flag parser; handles flags and positional args in any order, supports `--flag value`, `--flag=value`, `-fvalue` (for `-l`/`-r`). No stdlib `flag` package.
+2. **Path resolution** — handles `GIT_PREFIX` (set when called via `git alias`); must be applied both when a file argument is given AND when using cwd (two separate branches in `main()`).
 3. **Git queries** — `getGitRemoteURL()`, `getCurrentBranch()`, `getRepoRoot()` via `exec.Command("git", ...)`
 4. **`convertToHTTPS()`** — normalizes `git://` and `ssh://` URLs to HTTPS
 5. **`buildWebURL()`** — platform-specific URL construction (GitHub, GitLab, Bitbucket, Azure DevOps, Gitea/Gogs, AWS CodeCommit; falls back to GitHub-style)
 6. **Output** — `openBrowser()` or `copyToClipboard()`, both cross-platform
 
 **Line number fragment formats differ by platform** — check `buildWebURL()` before adding new platform support. GitLab uses `#L42-50`, GitHub uses `#L42-L50`, Bitbucket uses `#lines-42:50`, Azure DevOps uses query params.
+
+## Gotchas
+
+- **Adding a new flag**: update `parseArgs()` only — no other place to touch. Boolean flags must match the full arg string (e.g. `arg == "-c"`), not just the first character.
+- **`buildWebURL()` signature**: `(baseURL, branch, relPath, lineNumber, commitHash string)` — commit URLs use different path prefixes per platform (`/commit/`, `/-/commit/`, `/commits/`).
+- **`flag` package removed**: stdlib `flag` is not used; don't re-add it.
 
 ## CI/CD
 
