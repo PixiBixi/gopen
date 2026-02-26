@@ -34,7 +34,7 @@ func reorderArgs(args []string) []string {
 				flags = append(flags, arg)
 				// Check if next arg is the value
 				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					if arg == "--line" || arg == "--remote" || arg == "--commit" {
+					if arg == "--line" || arg == "--remote" {
 						i++
 						flags = append(flags, args[i])
 					}
@@ -47,7 +47,7 @@ func reorderArgs(args []string) []string {
 			// Boolean flags
 			if flagChar == "c" || flagChar == "v" {
 				flags = append(flags, arg)
-			} else if flagChar == "l" || flagChar == "r" || flagChar == "C" {
+			} else if flagChar == "l" || flagChar == "r" {
 				// Flag with value - check if value is attached
 				if len(arg) > 2 {
 					// Value attached like -l42
@@ -85,7 +85,6 @@ func main() {
 	lineNumber := flag.String("line", "", "Line number or range (e.g., 42 or 42-50)")
 	flag.StringVar(lineNumber, "l", "", "Line number or range (shorthand)")
 	commitHash := flag.String("commit", "", "Open a specific commit (hash or short hash)")
-	flag.StringVar(commitHash, "C", "", "Open a specific commit (shorthand)")
 	flag.Parse()
 
 	if *versionFlag {
