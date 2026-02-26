@@ -35,22 +35,32 @@ Pre-commit hooks run automatically: `fmt`, `vet`, `mod tidy`, `build`, `staticch
 
 ## Architecture
 
-Everything lives in `main.go` (~466 lines). The flow is strictly sequential:
+Code is split across 5 files:
 
-1. **`parseArgs()`** — custom flag parser; handles flags and positional args in any order, supports `--flag value`, `--flag=value`, `-fvalue` (for `-l`/`-r`). No stdlib `flag` package.
-2. **Path resolution** — handles `GIT_PREFIX` (set when called via `git alias`); must be applied both when a file argument is given AND when using cwd (two separate branches in `main()`).
-3. **Git queries** — `getGitRemoteURL()`, `getCurrentBranch()`, `getRepoRoot()` via `exec.Command("git", ...)`
-4. **`convertToHTTPS()`** — normalizes `git://` and `ssh://` URLs to HTTPS
-5. **`buildWebURL()`** — platform-specific URL construction (GitHub, GitLab, Bitbucket, Azure DevOps, Gitea/Gogs, AWS CodeCommit; falls back to GitHub-style)
-6. **Output** — `openBrowser()` or `copyToClipboard()`, both cross-platform
+| File | Responsibility |
+|---|---|
+| `main.go` | Orchestration only (~50 lines) |
+| `args.go` | `config` struct, `parseArgs()`, `usage()` |
+| `git.go` | `repoContext` struct, `resolvePath()`, `getRepoContext()`, git subprocess helpers, `convertToHTTPS()` |
+| `url.go` | `provider` struct, `providers` slice, `buildWebURL()`, `detectProvider()`, `pathJoin()`, line anchor helpers |
+| `output.go` | `openBrowser()`, `copyToClipboard()` |
 
-**Line number fragment formats differ by platform** — check `buildWebURL()` before adding new platform support. GitLab uses `#L42-50`, GitHub uses `#L42-L50`, Bitbucket uses `#lines-42:50`, Azure DevOps uses query params.
+The flow in `main()` is strictly sequential:
+
+1. `parseArgs()` — custom flag parser; flags and positional args in any order, `--flag value`, `--flag=value`, `-fvalue` (for `-l`/`-r`). No stdlib `flag` package.
+2. `resolvePath()` — resolves target to absolute path; applies `GIT_PREFIX` (set by git when called via alias, changes cwd to repo root).
+3. `getRepoContext()` — single call that runs all git queries and returns `repoContext{baseURL, branch, relPath}`.
+4. `buildWebURL()` — detects provider, delegates to the matching `provider` struct.
+5. `openBrowser()` or `copyToClipboard()`.
+
+**Adding a new platform**: add a `provider{}` entry to the `providers` slice in `url.go` — no other file to touch. Line anchor format differs per platform; see existing anchor helpers (`anchorLN`, `anchorGL`, `anchorBB`, `anchorADO`).
 
 ## Gotchas
 
-- **Adding a new flag**: update `parseArgs()` only — no other place to touch. Boolean flags must match the full arg string (e.g. `arg == "-c"`), not just the first character.
-- **`buildWebURL()` signature**: `(baseURL, branch, relPath, lineNumber, commitHash string)` — commit URLs use different path prefixes per platform (`/commit/`, `/-/commit/`, `/commits/`).
+- **Adding a new flag**: update `parseArgs()` in `args.go` only. Boolean flags must match the full arg string (`arg == "-c"`), not just the first character.
+- **`buildWebURL()` signature**: `(ctx repoContext, lineNumber, commitHash string)` — commit URLs use different path prefixes per platform (`/commit/`, `/-/commit/`, `/commits/`).
 - **`flag` package removed**: stdlib `flag` is not used; don't re-add it.
+- **Build command**: always `go build -o gopen .` (not `go build -o gopen main.go`) since code spans multiple files.
 
 ## CI/CD
 
