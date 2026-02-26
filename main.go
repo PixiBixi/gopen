@@ -34,7 +34,7 @@ func reorderArgs(args []string) []string {
 				flags = append(flags, arg)
 				// Check if next arg is the value
 				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					if arg == "--line" || arg == "--remote" {
+					if arg == "--line" || arg == "--remote" || arg == "--commit" {
 						i++
 						flags = append(flags, args[i])
 					}
@@ -47,7 +47,7 @@ func reorderArgs(args []string) []string {
 			// Boolean flags
 			if flagChar == "c" || flagChar == "v" {
 				flags = append(flags, arg)
-			} else if flagChar == "l" || flagChar == "r" {
+			} else if flagChar == "l" || flagChar == "r" || flagChar == "C" {
 				// Flag with value - check if value is attached
 				if len(arg) > 2 {
 					// Value attached like -l42
@@ -84,6 +84,8 @@ func main() {
 	flag.BoolVar(copyFlag, "c", false, "Copy URL to clipboard instead of opening browser (shorthand)")
 	lineNumber := flag.String("line", "", "Line number or range (e.g., 42 or 42-50)")
 	flag.StringVar(lineNumber, "l", "", "Line number or range (shorthand)")
+	commitHash := flag.String("commit", "", "Open a specific commit (hash or short hash)")
+	flag.StringVar(commitHash, "C", "", "Open a specific commit (shorthand)")
 	flag.Parse()
 
 	if *versionFlag {
@@ -180,7 +182,7 @@ func main() {
 	}
 
 	// Build web URL
-	webURL := buildWebURL(httpsURL, branch, relPath, *lineNumber)
+	webURL := buildWebURL(httpsURL, branch, relPath, *lineNumber, *commitHash)
 
 	// Copy to clipboard or open in browser
 	if *copyFlag {
@@ -267,7 +269,7 @@ func convertToHTTPS(url string) string {
 }
 
 // buildWebURL constructs the web URL for the repository
-func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
+func buildWebURL(baseURL, branch, relPath, lineNumber, commitHash string) string {
 	// Normalize relative path (empty or "." means root)
 	if relPath == "." || relPath == "" {
 		relPath = ""
@@ -289,8 +291,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 	// Detect provider and build appropriate URL
 	switch {
 	case strings.Contains(baseURL, "github.com"):
-		// GitHub: https://github.com/user/repo/tree/branch/path#L42 or #L42-L50
-		if relPath == "" {
+		if commitHash != "" {
+			// GitHub commit: .../commit/HASH or .../blob/HASH/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/blob/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/tree/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
@@ -304,8 +312,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "gitlab.com") || strings.Contains(baseURL, "gitlab"):
-		// GitLab: https://gitlab.com/user/repo/-/tree/branch/path#L42 or #L42-50
-		if relPath == "" {
+		if commitHash != "" {
+			// GitLab commit: .../-/commit/HASH or .../-/blob/HASH/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/-/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/-/blob/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/-/tree/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/-/tree/%s/%s", baseURL, branch, relPath)
@@ -319,8 +333,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "bitbucket.org"):
-		// Bitbucket Cloud: https://bitbucket.org/user/repo/src/branch/path#lines-42 or #lines-42:50
-		if relPath == "" {
+		if commitHash != "" {
+			// Bitbucket commit: .../commits/HASH or .../src/HASH/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commits/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/src/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/src/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
@@ -334,8 +354,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "dev.azure.com") || strings.Contains(baseURL, "visualstudio.com"):
-		// Azure DevOps: https://dev.azure.com/org/project/_git/repo?version=GBbranch&path=/path&line=42&lineEnd=50
-		if relPath == "" {
+		if commitHash != "" {
+			// Azure DevOps commit: .../commit/HASH or ...?version=GC<HASH>&path=/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s?version=GC%s&path=/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s?version=GB%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s?version=GB%s&path=/%s", baseURL, branch, relPath)
@@ -349,8 +375,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "gitea"):
-		// Gitea: https://gitea.domain.com/user/repo/src/branch/path#L42 or #L42-L50
-		if relPath == "" {
+		if commitHash != "" {
+			// Gitea commit: .../commit/HASH or .../src/commit/HASH/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/src/commit/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/src/branch/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/src/branch/%s/%s", baseURL, branch, relPath)
@@ -364,8 +396,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "gogs"):
-		// Gogs: https://gogs.domain.com/user/repo/src/branch/path#L42 or #L42-L50
-		if relPath == "" {
+		if commitHash != "" {
+			// Gogs commit: .../commit/HASH or .../src/HASH/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/src/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/src/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/src/%s/%s", baseURL, branch, relPath)
@@ -379,9 +417,14 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 		}
 
 	case strings.Contains(baseURL, "console.aws.amazon.com") || strings.Contains(baseURL, "codecommit"):
-		// AWS CodeCommit: Already HTTPS console URL
-		// Format: https://console.aws.amazon.com/codesuite/codecommit/repositories/repo/browse/refs/heads/branch/--/path
-		if relPath == "" {
+		if commitHash != "" {
+			// AWS CodeCommit commit: .../commit/HASH or .../browse/HASH/--/file
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/browse/%s/--/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/browse/refs/heads/%s/--/", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/browse/refs/heads/%s/--/%s", baseURL, branch, relPath)
@@ -390,7 +433,13 @@ func buildWebURL(baseURL, branch, relPath, lineNumber string) string {
 
 	default:
 		// Fallback to GitHub-style format
-		if relPath == "" {
+		if commitHash != "" {
+			if relPath == "" {
+				url = fmt.Sprintf("%s/commit/%s", baseURL, commitHash)
+			} else {
+				url = fmt.Sprintf("%s/blob/%s/%s", baseURL, commitHash, relPath)
+			}
+		} else if relPath == "" {
 			url = fmt.Sprintf("%s/tree/%s", baseURL, branch)
 		} else {
 			url = fmt.Sprintf("%s/tree/%s/%s", baseURL, branch, relPath)
