@@ -34,26 +34,23 @@ func reorderArgs(args []string) []string {
 				flags = append(flags, arg)
 				// Check if next arg is the value
 				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					if arg == "--line" || arg == "--remote" {
+					if arg == "--line" || arg == "--remote" || arg == "--commit" {
 						i++
 						flags = append(flags, args[i])
 					}
 				}
 			}
 		} else if strings.HasPrefix(arg, "-") && len(arg) > 1 {
-			// Short flag like -l42 or -l 42
-			flagChar := arg[1:2]
-
-			// Boolean flags
-			if flagChar == "c" || flagChar == "v" {
+			// Short flags: match exactly to avoid misclassifying -commit as -c
+			if arg == "-c" || arg == "-v" {
+				// Boolean short flags
 				flags = append(flags, arg)
-			} else if flagChar == "l" || flagChar == "r" {
-				// Flag with value - check if value is attached
+			} else if arg[1:2] == "l" || arg[1:2] == "r" {
+				// Value short flags, optionally with attached value like -l42
+				flagChar := arg[1:2]
 				if len(arg) > 2 {
-					// Value attached like -l42
 					flags = append(flags, "-"+flagChar, arg[2:])
 				} else {
-					// Separate value like -l 42
 					flags = append(flags, arg)
 					if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 						i++
@@ -61,7 +58,13 @@ func reorderArgs(args []string) []string {
 					}
 				}
 			} else {
+				// Long-name single-dash flags (e.g. -commit, -remote): pass through
+				// and consume the next non-flag argument as their value
 				flags = append(flags, arg)
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+					i++
+					flags = append(flags, args[i])
+				}
 			}
 		} else {
 			positional = append(positional, arg)
