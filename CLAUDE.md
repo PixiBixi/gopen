@@ -14,6 +14,7 @@ Module: `github.com/PixiBixi/gopen` | Go 1.26 | No external deps (stdlib only)
 # Build
 make build           # binary: ./gopen
 make build-all       # all platforms via GoReleaser
+go build -o gopen .      # correct since code is split across multiple files
 go build -v ./...
 
 # Test & lint
