@@ -1,7 +1,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,80 +16,110 @@ var (
 	date    = "unknown"
 )
 
-// reorderArgs reorders arguments to put all flags before positional arguments
-// This allows "gopen file.go -l 42" to work the same as "gopen -l 42 file.go"
-// Also handles flags with values attached like -l42 -> -l 42
-func reorderArgs(args []string) []string {
-	var flags []string
-	var positional []string
+type config struct {
+	version    bool
+	remoteName string
+	copy       bool
+	line       string
+	commit     string
+	paths      []string
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `Usage: gopen [flags] [path]
+
+Open a Git repository path in the browser at the current branch.
+
+Flags:
+  -v, --version        Print version information
+  -c, --copy           Copy URL to clipboard instead of opening browser
+  -r, --remote <name>  Git remote to use (default: origin)
+  -l, --line <n[-m]>   Highlight line or range (e.g. 42 or 42-50)
+      --commit <hash>  Open a specific commit or file at that commit
+
+Examples:
+  gopen                        # current directory
+  gopen main.go                # file on current branch
+  gopen main.go -l 42          # file at line 42
+  gopen --commit abc1234       # commit page
+  gopen --commit abc1234 -c    # copy commit URL
+`)
+}
+
+// parseArgs parses flags and positional arguments in any order.
+// Supports: --flag value, --flag=value, -f value, -fvalue (for -l/-r).
+func parseArgs(args []string) (config, error) {
+	cfg := config{remoteName: "origin"}
+
+	stringFlag := func(i *int, arg, prefix string) (string, error) {
+		if v, ok := strings.CutPrefix(arg, prefix+"="); ok {
+			return v, nil
+		}
+		*i++
+		if *i >= len(args) {
+			return "", fmt.Errorf("flag %s requires a value", prefix)
+		}
+		return args[*i], nil
+	}
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if strings.HasPrefix(arg, "--") {
-			// Long flag like --line=42 or --line 42
-			if strings.Contains(arg, "=") {
-				flags = append(flags, arg)
+		switch {
+		case arg == "-v" || arg == "--version":
+			cfg.version = true
+		case arg == "-c" || arg == "--copy":
+			cfg.copy = true
+		case arg == "-r" || arg == "--remote" || strings.HasPrefix(arg, "-r") || strings.HasPrefix(arg, "--remote="):
+			if arg == "-r" || arg == "--remote" {
+				v, err := stringFlag(&i, arg, arg)
+				if err != nil {
+					return cfg, err
+				}
+				cfg.remoteName = v
+			} else if v, ok := strings.CutPrefix(arg, "--remote="); ok {
+				cfg.remoteName = v
 			} else {
-				flags = append(flags, arg)
-				// Check if next arg is the value
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					if arg == "--line" || arg == "--remote" || arg == "--commit" {
-						i++
-						flags = append(flags, args[i])
-					}
-				}
+				cfg.remoteName = arg[2:] // -rorigin
 			}
-		} else if strings.HasPrefix(arg, "-") && len(arg) > 1 {
-			// Short flags: match exactly to avoid misclassifying -commit as -c
-			if arg == "-c" || arg == "-v" {
-				// Boolean short flags
-				flags = append(flags, arg)
-			} else if arg[1:2] == "l" || arg[1:2] == "r" {
-				// Value short flags, optionally with attached value like -l42
-				flagChar := arg[1:2]
-				if len(arg) > 2 {
-					flags = append(flags, "-"+flagChar, arg[2:])
-				} else {
-					flags = append(flags, arg)
-					if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-						i++
-						flags = append(flags, args[i])
-					}
+		case arg == "-l" || arg == "--line" || strings.HasPrefix(arg, "-l") || strings.HasPrefix(arg, "--line="):
+			if arg == "-l" || arg == "--line" {
+				v, err := stringFlag(&i, arg, arg)
+				if err != nil {
+					return cfg, err
 				}
+				cfg.line = v
+			} else if v, ok := strings.CutPrefix(arg, "--line="); ok {
+				cfg.line = v
 			} else {
-				// Long-name single-dash flags (e.g. -commit, -remote): pass through
-				// and consume the next non-flag argument as their value
-				flags = append(flags, arg)
-				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-					i++
-					flags = append(flags, args[i])
-				}
+				cfg.line = arg[2:] // -l42
 			}
-		} else {
-			positional = append(positional, arg)
+		case arg == "--commit" || strings.HasPrefix(arg, "--commit="):
+			v, err := stringFlag(&i, arg, "--commit")
+			if err != nil {
+				return cfg, err
+			}
+			cfg.commit = v
+		case arg == "--":
+			cfg.paths = append(cfg.paths, args[i+1:]...)
+			return cfg, nil
+		case strings.HasPrefix(arg, "-"):
+			return cfg, fmt.Errorf("unknown flag: %s", arg)
+		default:
+			cfg.paths = append(cfg.paths, arg)
 		}
 	}
-
-	return append(flags, positional...)
+	return cfg, nil
 }
 
 func main() {
-	// Parse flags - reorder args to support flags after positional arguments
-	args := reorderArgs(os.Args[1:])
-	os.Args = append([]string{os.Args[0]}, args...)
+	cfg, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		usage()
+		os.Exit(1)
+	}
 
-	versionFlag := flag.Bool("version", false, "Print version information")
-	flag.BoolVar(versionFlag, "v", false, "Print version information (shorthand)")
-	remoteName := flag.String("remote", "origin", "Git remote name to use")
-	flag.StringVar(remoteName, "r", "origin", "Git remote name to use (shorthand)")
-	copyFlag := flag.Bool("copy", false, "Copy URL to clipboard instead of opening browser")
-	flag.BoolVar(copyFlag, "c", false, "Copy URL to clipboard instead of opening browser (shorthand)")
-	lineNumber := flag.String("line", "", "Line number or range (e.g., 42 or 42-50)")
-	flag.StringVar(lineNumber, "l", "", "Line number or range (shorthand)")
-	commitHash := flag.String("commit", "", "Open a specific commit (hash or short hash)")
-	flag.Parse()
-
-	if *versionFlag {
+	if cfg.version {
 		fmt.Printf("git-opener %s\n", version)
 		fmt.Printf("commit: %s\n", commit)
 		fmt.Printf("built: %s\n", date)
@@ -99,10 +128,8 @@ func main() {
 
 	// Get target path (file or directory)
 	var targetPath string
-	if flag.NArg() > 0 {
-		// File/directory provided as argument
-		targetPath = flag.Arg(0)
-		// Convert to absolute path if relative
+	if len(cfg.paths) > 0 {
+		targetPath = cfg.paths[0]
 		if !filepath.IsAbs(targetPath) {
 			cwd, err := os.Getwd()
 			if err != nil {
@@ -117,14 +144,11 @@ func main() {
 			targetPath = filepath.Join(cwd, targetPath)
 		}
 	} else {
-		// Use current directory
-		var err error
 		targetPath, err = os.Getwd()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting current directory: %v\n", err)
 			os.Exit(1)
 		}
-
 		// When called via git alias, git changes cwd to repo root
 		// but sets GIT_PREFIX to the original relative path
 		if gitPrefix := os.Getenv("GIT_PREFIX"); gitPrefix != "" {
@@ -153,7 +177,7 @@ func main() {
 	}
 
 	// Get git remote URL
-	remoteURL, err := getGitRemoteURL(*remoteName, checkDir)
+	remoteURL, err := getGitRemoteURL(cfg.remoteName, checkDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting git remote URL: %v\n", err)
 		os.Exit(1)
@@ -184,10 +208,10 @@ func main() {
 	}
 
 	// Build web URL
-	webURL := buildWebURL(httpsURL, branch, relPath, *lineNumber, *commitHash)
+	webURL := buildWebURL(httpsURL, branch, relPath, cfg.line, cfg.commit)
 
 	// Copy to clipboard or open in browser
-	if *copyFlag {
+	if cfg.copy {
 		if err := copyToClipboard(webURL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying to clipboard: %v\n", err)
 			os.Exit(1)
