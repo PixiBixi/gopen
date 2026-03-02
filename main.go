@@ -24,6 +24,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	if cfg.completion != "" {
+		shell := cfg.completion
+		if shell == "auto" {
+			shell = detectShell()
+		}
+		printCompletion(shell)
+		os.Exit(0)
+	}
+
 	targetPath, err := resolvePath(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

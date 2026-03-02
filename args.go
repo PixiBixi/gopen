@@ -12,6 +12,7 @@ type config struct {
 	copy       bool
 	line       string
 	commit     string
+	completion string // "auto" = detect from $SHELL, "bash"/"zsh"/"fish" = explicit
 	paths      []string
 }
 
@@ -26,6 +27,7 @@ Flags:
   -r, --remote <name>  Git remote to use (default: origin)
   -l, --line <n[-m]>   Highlight line or range (e.g. 42 or 42-50)
       --commit <hash>  Open a specific commit or file at that commit
+      --completion [shell]  Output shell completion script (bash, zsh, fish)
 
 Examples:
   gopen                        # current directory
@@ -33,6 +35,8 @@ Examples:
   gopen main.go -l 42          # file at line 42
   gopen --commit abc1234       # commit page
   gopen --commit abc1234 -c    # copy commit URL
+  gopen --completion           # shell completion script (auto-detected)
+  gopen --completion=zsh       # zsh completion script
 `)
 }
 
@@ -76,6 +80,14 @@ func parseArgs(args []string) (config, error) {
 				return cfg, err
 			}
 			cfg.commit = v
+		case "--completion":
+			// Optional shell arg: --completion [bash|zsh|fish]
+			if i+1 < len(args) && isKnownShell(args[i+1]) {
+				i++
+				cfg.completion = args[i]
+			} else {
+				cfg.completion = "auto"
+			}
 		case "--":
 			cfg.paths = append(cfg.paths, args[i+1:]...)
 			return cfg, nil
@@ -87,6 +99,8 @@ func parseArgs(args []string) (config, error) {
 				cfg.line = arg[len("--line="):]
 			case strings.HasPrefix(arg, "--commit="):
 				cfg.commit = arg[len("--commit="):]
+			case strings.HasPrefix(arg, "--completion="):
+				cfg.completion = arg[len("--completion="):]
 			case len(arg) > 2 && arg[0] == '-' && arg[1] == 'r':
 				cfg.remoteName = arg[2:] // -rorigin
 			case len(arg) > 2 && arg[0] == '-' && arg[1] == 'l':
@@ -99,4 +113,8 @@ func parseArgs(args []string) (config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func isKnownShell(s string) bool {
+	return s == "bash" || s == "zsh" || s == "fish"
 }
