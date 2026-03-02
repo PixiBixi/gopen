@@ -35,7 +35,7 @@ Pre-commit hooks run automatically: `fmt`, `vet`, `mod tidy`, `build`, `staticch
 
 ## Architecture
 
-Code is split across 5 files:
+Code is split across 6 files:
 
 | File | Responsibility |
 |---|---|
@@ -44,6 +44,7 @@ Code is split across 5 files:
 | `git.go` | `repoContext` struct, `resolvePath()`, `getRepoContext()`, git subprocess helpers, `convertToHTTPS()` |
 | `url.go` | `provider` struct, `providers` slice, `buildWebURL()`, `detectProvider()`, `pathJoin()`, line anchor helpers |
 | `output.go` | `openBrowser()`, `copyToClipboard()` |
+| `completion.go` | `detectShell()`, `printCompletion()`, bash/zsh/fish completion scripts |
 
 The flow in `main()` is strictly sequential:
 
