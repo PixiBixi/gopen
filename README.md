@@ -13,6 +13,8 @@ Open your git repository in the browser at the current branch and directory. Sim
 - 🔢 **Line numbers**: Jump to specific line or line range in files
 - 🔀 **Multiple remotes**: Choose which remote to open (origin, upstream, fork, etc.)
 - 📋 **Clipboard mode**: Copy URL instead of opening browser
+- 🔖 **Commit links**: Open a specific commit page or file at a given commit
+- 🐚 **Shell completion**: Built-in completion for bash, zsh, and fish
 - 🔄 Converts git:// and ssh:// URLs to HTTPS automatically
 - 🌐 Supports GitHub, GitLab, Bitbucket, Azure DevOps, Gitea, Gogs, AWS CodeCommit
 - 💻 Cross-platform (macOS, Linux, Windows)
@@ -90,6 +92,14 @@ gopen -r upstream -c main.go
 gopen --copy src/lib/utils.go
 gopen -l 42 -c main.go
 
+# Open a specific commit
+gopen --commit abc1234
+gopen --commit abc1234 main.go   # file at that commit
+
+# Shell completion
+gopen --completion               # auto-detect shell
+gopen --completion=zsh           # explicit shell (bash, zsh, fish)
+
 # Show version
 gopen -v
 gopen --version
@@ -151,6 +161,20 @@ gopen src/utils.go -l 100-120
 # → Opens: https://github.com/user/my-repo/tree/main/src/utils.go#L100-L120
 ```
 
+### Commit links
+```bash
+# Open the commit page
+gopen --commit abc1234
+# → Opens: https://github.com/user/repo/commit/abc1234
+
+# Open a file as it was at a specific commit
+gopen --commit abc1234 main.go
+# → Opens: https://github.com/user/repo/blob/abc1234/main.go
+
+# Copy commit URL to clipboard
+gopen --commit abc1234 -c
+```
+
 ## Git alias (recommended)
 
 Add to your git config for native-style usage:
@@ -166,6 +190,21 @@ git open main.go
 git open -l 42 main.go
 git open -r upstream
 ```
+
+## Shell completion
+
+```bash
+# zsh — add to ~/.zshrc
+eval "$(gopen --completion=zsh)"
+
+# bash — add to ~/.bashrc
+eval "$(gopen --completion=bash)"
+
+# fish — add to ~/.config/fish/config.fish
+gopen --completion=fish | source
+```
+
+After reloading your shell, `gopen --<Tab>` completes flags and `gopen <Tab>` completes file paths.
 
 ## Supported Platforms
 
@@ -203,7 +242,7 @@ https://github.com/user/repo.git          → https://github.com/user/repo
 
 ```bash
 # Build
-go build -v
+go build -o gopen .
 
 # Test
 go test ./...
