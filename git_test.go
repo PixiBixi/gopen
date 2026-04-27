@@ -272,4 +272,18 @@ func TestGetRepoContext(t *testing.T) {
 			t.Error("expected error for non-git dir, got nil")
 		}
 	})
+
+	t.Run("non-existent path returns stat error", func(t *testing.T) {
+		_, err := getRepoContext(filepath.Join(realDir, "no-such-path"), "origin")
+		if err == nil {
+			t.Error("expected error for non-existent path, got nil")
+		}
+	})
+
+	t.Run("wrong remote name returns error", func(t *testing.T) {
+		_, err := getRepoContext(realDir, "nonexistent-remote")
+		if err == nil {
+			t.Error("expected error for nonexistent remote, got nil")
+		}
+	})
 }

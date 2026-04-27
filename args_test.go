@@ -102,6 +102,38 @@ func TestParseArgs(t *testing.T) {
 			want: config{remoteName: "origin", commit: "abc1234"},
 		},
 
+		// --completion
+		{
+			name: "completion auto (no shell arg)",
+			args: []string{"--completion"},
+			want: config{remoteName: "origin", completion: "auto"},
+		},
+		{
+			name: "completion bash",
+			args: []string{"--completion", "bash"},
+			want: config{remoteName: "origin", completion: "bash"},
+		},
+		{
+			name: "completion zsh",
+			args: []string{"--completion", "zsh"},
+			want: config{remoteName: "origin", completion: "zsh"},
+		},
+		{
+			name: "completion fish",
+			args: []string{"--completion", "fish"},
+			want: config{remoteName: "origin", completion: "fish"},
+		},
+		{
+			name: "completion equals bash",
+			args: []string{"--completion=bash"},
+			want: config{remoteName: "origin", completion: "bash"},
+		},
+		{
+			name: "completion unknown shell becomes auto and arg treated as path",
+			args: []string{"--completion", "csh"},
+			want: config{remoteName: "origin", completion: "auto", paths: []string{"csh"}},
+		},
+
 		// Positional args
 		{
 			name: "single path",
