@@ -87,7 +87,7 @@ func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 
 	relPath, err := filepath.Rel(repoRoot, targetPath)
 	if err != nil {
-		return repoContext{}, err
+		return repoContext{}, fmt.Errorf("failed to compute relative path: %w", err)
 	}
 	if relPath == "." {
 		relPath = ""

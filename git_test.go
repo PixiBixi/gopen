@@ -72,6 +72,11 @@ func TestResolvePath(t *testing.T) {
 			want:  tmp,
 		},
 		{
+			name:  "relative path is joined with effective cwd",
+			paths: []string{"git_test.go"},
+			want:  filepath.Join(cwd, "git_test.go"),
+		},
+		{
 			name:    "non-existent path returns error wrapping os.ErrNotExist",
 			paths:   []string{filepath.Join(tmp, "no-such-file")},
 			wantErr: true,
@@ -190,4 +195,81 @@ func TestGetGitRemoteURL_Error(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nonexistent remote, got nil")
 	}
+}
+
+// --- getRepoContext ---
+
+// realPath resolves symlinks — needed on macOS where t.TempDir() returns
+// a /var/folders path that git resolves to /private/var/folders.
+func realPath(t *testing.T, p string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", p, err)
+	}
+	return r
+}
+
+func TestGetRepoContext(t *testing.T) {
+	dir := newTmpGitRepo(t)
+	const remoteURL = "https://github.com/example/repo"
+	cmd := exec.Command("git", "remote", "add", "origin", remoteURL)
+	cmd.Dir = dir
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("git remote add: %v", err)
+	}
+	// Use the real (symlink-resolved) dir so paths match what git reports.
+	realDir := realPath(t, dir)
+
+	t.Run("repo root path returns empty relPath", func(t *testing.T) {
+		ctx, err := getRepoContext(realDir, "origin")
+		if err != nil {
+			t.Fatalf("getRepoContext() error = %v", err)
+		}
+		if ctx.relPath != "" {
+			t.Errorf("relPath = %q, want empty string for repo root", ctx.relPath)
+		}
+		if ctx.baseURL != remoteURL {
+			t.Errorf("baseURL = %q, want %q", ctx.baseURL, remoteURL)
+		}
+		if ctx.branch == "" {
+			t.Error("branch is empty")
+		}
+	})
+
+	t.Run("file path returns correct relPath", func(t *testing.T) {
+		filePath := filepath.Join(realDir, "main.go")
+		if err := os.WriteFile(filePath, []byte(""), 0644); err != nil {
+			t.Fatal(err)
+		}
+		ctx, err := getRepoContext(filePath, "origin")
+		if err != nil {
+			t.Fatalf("getRepoContext() error = %v", err)
+		}
+		if ctx.relPath != "main.go" {
+			t.Errorf("relPath = %q, want %q", ctx.relPath, "main.go")
+		}
+	})
+
+	t.Run("subdirectory path returns correct relPath", func(t *testing.T) {
+		subdir := filepath.Join(realDir, "pkg", "util")
+		if err := os.MkdirAll(subdir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		ctx, err := getRepoContext(subdir, "origin")
+		if err != nil {
+			t.Fatalf("getRepoContext() error = %v", err)
+		}
+		if ctx.relPath != filepath.Join("pkg", "util") {
+			t.Errorf("relPath = %q, want %q", ctx.relPath, filepath.Join("pkg", "util"))
+		}
+	})
+
+	t.Run("non-git directory returns error", func(t *testing.T) {
+		nonGitDir := t.TempDir()
+		_, err := getRepoContext(nonGitDir, "origin")
+		if err == nil {
+			t.Error("expected error for non-git dir, got nil")
+		}
+	})
 }
