@@ -7,41 +7,32 @@ import (
 )
 
 func openBrowser(url string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", url)
-	default:
-		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	cmd, err := buildOpenCmd(url, runtime.GOOS)
+	if err != nil {
+		return err
 	}
 	return cmd.Run()
 }
 
-func copyToClipboard(text string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
+// buildOpenCmd returns the OS-appropriate command to open url in a browser.
+func buildOpenCmd(url, goos string) (*exec.Cmd, error) {
+	switch goos {
 	case "darwin":
-		cmd = exec.Command("pbcopy")
+		return exec.Command("open", url), nil
 	case "linux":
-		if _, err := exec.LookPath("wl-copy"); err == nil {
-			cmd = exec.Command("wl-copy")
-		} else if _, err := exec.LookPath("xclip"); err == nil {
-			cmd = exec.Command("xclip", "-selection", "clipboard")
-		} else if _, err := exec.LookPath("xsel"); err == nil {
-			cmd = exec.Command("xsel", "--clipboard", "--input")
-		} else {
-			return fmt.Errorf("no clipboard utility found (install wl-copy, xclip, or xsel)")
-		}
+		return exec.Command("xdg-open", url), nil
 	case "windows":
-		cmd = exec.Command("clip")
+		return exec.Command("cmd", "/c", "start", url), nil
 	default:
-		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return nil, fmt.Errorf("unsupported platform: %s", goos)
 	}
+}
 
+func copyToClipboard(text string) error {
+	cmd, err := buildClipboardCmd(runtime.GOOS)
+	if err != nil {
+		return err
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("failed to open stdin pipe: %w", err)
@@ -56,4 +47,25 @@ func copyToClipboard(text string) error {
 		return fmt.Errorf("failed to close stdin: %w", err)
 	}
 	return cmd.Wait()
+}
+
+// buildClipboardCmd returns the OS-appropriate command to write to the clipboard via stdin.
+func buildClipboardCmd(goos string) (*exec.Cmd, error) {
+	switch goos {
+	case "darwin":
+		return exec.Command("pbcopy"), nil
+	case "linux":
+		if _, err := exec.LookPath("wl-copy"); err == nil {
+			return exec.Command("wl-copy"), nil
+		} else if _, err := exec.LookPath("xclip"); err == nil {
+			return exec.Command("xclip", "-selection", "clipboard"), nil
+		} else if _, err := exec.LookPath("xsel"); err == nil {
+			return exec.Command("xsel", "--clipboard", "--input"), nil
+		}
+		return nil, fmt.Errorf("no clipboard utility found (install wl-copy, xclip, or xsel)")
+	case "windows":
+		return exec.Command("clip"), nil
+	default:
+		return nil, fmt.Errorf("unsupported platform: %s", goos)
+	}
 }
