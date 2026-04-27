@@ -29,7 +29,7 @@ func buildOpenCmd(url, goos string) (*exec.Cmd, error) {
 }
 
 func copyToClipboard(text string) error {
-	cmd, err := buildClipboardCmd(runtime.GOOS)
+	cmd, err := buildClipboardCmd(runtime.GOOS, exec.LookPath)
 	if err != nil {
 		return err
 	}
@@ -50,16 +50,17 @@ func copyToClipboard(text string) error {
 }
 
 // buildClipboardCmd returns the OS-appropriate command to write to the clipboard via stdin.
-func buildClipboardCmd(goos string) (*exec.Cmd, error) {
+// lookPath is injected to allow testing the Linux fallback chain without system dependencies.
+func buildClipboardCmd(goos string, lookPath func(string) (string, error)) (*exec.Cmd, error) {
 	switch goos {
 	case "darwin":
 		return exec.Command("pbcopy"), nil
 	case "linux":
-		if _, err := exec.LookPath("wl-copy"); err == nil {
+		if _, err := lookPath("wl-copy"); err == nil {
 			return exec.Command("wl-copy"), nil
-		} else if _, err := exec.LookPath("xclip"); err == nil {
+		} else if _, err := lookPath("xclip"); err == nil {
 			return exec.Command("xclip", "-selection", "clipboard"), nil
-		} else if _, err := exec.LookPath("xsel"); err == nil {
+		} else if _, err := lookPath("xsel"); err == nil {
 			return exec.Command("xsel", "--clipboard", "--input"), nil
 		}
 		return nil, fmt.Errorf("no clipboard utility found (install wl-copy, xclip, or xsel)")

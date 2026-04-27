@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -44,18 +45,37 @@ func TestBuildOpenCmd(t *testing.T) {
 }
 
 func TestBuildClipboardCmd(t *testing.T) {
+	alwaysFound := func(string) (string, error) { return "/usr/bin/found", nil }
+	neverFound := func(string) (string, error) { return "", errors.New("not found") }
+	firstFound := func() func(string) (string, error) {
+		calls := 0
+		return func(name string) (string, error) {
+			calls++
+			if calls == 1 {
+				return "/usr/bin/" + name, nil
+			}
+			return "", errors.New("not found")
+		}
+	}
+
 	tests := []struct {
-		goos    string
-		wantErr bool
+		name       string
+		goos       string
+		lookPath   func(string) (string, error)
+		wantErr    bool
+		wantBinary string
 	}{
-		{"darwin", false},
-		{"windows", false},
-		{"plan9", true},
+		{"darwin", "darwin", alwaysFound, false, "pbcopy"},
+		{"windows", "windows", alwaysFound, false, "clip"},
+		{"unsupported", "plan9", alwaysFound, true, ""},
+		{"linux wl-copy found", "linux", alwaysFound, false, "wl-copy"},
+		{"linux xclip fallback", "linux", firstFound(), false, "wl-copy"},
+		{"linux no tools found", "linux", neverFound, true, ""},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.goos, func(t *testing.T) {
-			cmd, err := buildClipboardCmd(tt.goos)
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := buildClipboardCmd(tt.goos, tt.lookPath)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -67,6 +87,9 @@ func TestBuildClipboardCmd(t *testing.T) {
 			}
 			if cmd == nil {
 				t.Error("expected non-nil cmd")
+			}
+			if tt.wantBinary != "" && !strings.Contains(cmd.Path, tt.wantBinary) {
+				t.Errorf("cmd.Path = %q, want to contain %q", cmd.Path, tt.wantBinary)
 			}
 		})
 	}
