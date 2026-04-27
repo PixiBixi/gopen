@@ -33,7 +33,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	targetPath, err := resolvePath(cfg)
+	targetPath, err := resolvePath(cfg.paths)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

@@ -24,3 +24,6 @@ Thumbs.db
 
 # GoReleaser
 dist/
+
+# Desloppify
+.desloppify/

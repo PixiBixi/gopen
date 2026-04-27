@@ -37,7 +37,7 @@ func copyToClipboard(text string) error {
 			return fmt.Errorf("no clipboard utility found (install wl-copy, xclip, or xsel)")
 		}
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "echo", text, "|", "clip")
+		cmd = exec.Command("clip")
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}

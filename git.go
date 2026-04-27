@@ -20,7 +20,7 @@ type repoContext struct {
 func effectiveCwd() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 	if prefix := os.Getenv("GIT_PREFIX"); prefix != "" {
 		return filepath.Join(cwd, prefix), nil
@@ -29,10 +29,10 @@ func effectiveCwd() (string, error) {
 }
 
 // resolvePath returns the absolute path to the target file or directory.
-func resolvePath(cfg config) (string, error) {
+func resolvePath(paths []string) (string, error) {
 	var p string
-	if len(cfg.paths) > 0 {
-		p = cfg.paths[0]
+	if len(paths) > 0 {
+		p = paths[0]
 		if !filepath.IsAbs(p) {
 			cwd, err := effectiveCwd()
 			if err != nil {
@@ -48,8 +48,8 @@ func resolvePath(cfg config) (string, error) {
 		}
 	}
 
-	if _, err := os.Stat(p); os.IsNotExist(err) {
-		return "", fmt.Errorf("path does not exist: %s", p)
+	if _, err := os.Stat(p); err != nil {
+		return "", fmt.Errorf("path does not exist: %w", err)
 	}
 	return p, nil
 }
@@ -58,7 +58,7 @@ func resolvePath(cfg config) (string, error) {
 func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 	info, err := os.Stat(targetPath)
 	if err != nil {
-		return repoContext{}, err
+		return repoContext{}, fmt.Errorf("failed to stat path: %w", err)
 	}
 
 	dir := targetPath
