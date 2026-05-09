@@ -4,6 +4,8 @@
 [![Release](https://img.shields.io/github/v/release/pixibixi/gopen)](https://github.com/pixibixi/gopen/releases)
 [![License](https://img.shields.io/github/license/pixibixi/gopen)](LICENSE)
 
+![Code Quality Scorecard](scorecard.png)
+
 Open your git repository in the browser at the current branch and directory. Simple, fast, and works with any git platform.
 
 ## Features
@@ -254,15 +256,12 @@ staticcheck ./...
 
 ### Create a release
 
-```bash
-git tag -a v1.0.0 -m "Release v1.0.0"
-git push origin v1.0.0
-```
+Releases are automated via [release-please](https://github.com/googleapis/release-please):
 
-GoReleaser will automatically:
-- Build binaries for all platforms
-- Create GitHub release with changelog
-- Upload binaries and checksums
+1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `perf:`, etc.)
+2. release-please opens a release PR with an updated `CHANGELOG.md` and bumped version
+3. Merge the PR — release-please creates the tag automatically
+4. GoReleaser triggers and builds binaries for all platforms, updates the Homebrew tap
 
 ## License
 
