@@ -44,6 +44,14 @@ brew install pixibixi/tap/gopen
 
 Download the latest release from the [releases page](https://github.com/pixibixi/gopen/releases).
 
+### Docker
+
+```bash
+docker run --rm -v $(pwd):/repo -w /repo ghcr.io/pixibixi/gopen:latest
+```
+
+Images are available for `linux/amd64` and `linux/arm64` (covers macOS Apple Silicon via Docker Desktop).
+
 ### Build from source
 
 ```bash
