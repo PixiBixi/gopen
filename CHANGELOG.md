@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/PixiBixi/gopen/compare/v1.3.1...v1.3.2) (2026-05-09)
+
+
+### Bug Fixes
+
+* **ci:** trigger release workflow on published release instead of tag push ([585dc59](https://github.com/PixiBixi/gopen/commit/585dc59fafefdd1bb15b778efed629af18dded9d))
+
 ## [1.3.1](https://github.com/PixiBixi/gopen/compare/v1.3.0...v1.3.1) (2026-05-09)
 
 
