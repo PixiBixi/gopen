@@ -39,6 +39,9 @@ jobs:
       - name: Run staticcheck
         run: staticcheck ./...
 
+      - name: Run tests
+        run: go test -race ./...
+
   build:
     name: Build
     runs-on: ${{ matrix.os }}
