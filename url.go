@@ -226,8 +226,8 @@ func convertToHTTPS(url string) string {
 		return fmt.Sprintf("https://%s/%s", matches[1], matches[2])
 	}
 
-	if strings.HasPrefix(url, "ssh://") {
-		url = strings.TrimPrefix(url, "ssh://")
+	if after, ok := strings.CutPrefix(url, "ssh://"); ok {
+		url = after
 		url = strings.TrimPrefix(url, "git@")
 		url = strings.Replace(url, ":", "/", 1)
 		return "https://" + url

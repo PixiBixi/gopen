@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
@@ -63,7 +64,7 @@ func buildClipboardCmd(goos string, lookPath func(string) (string, error)) (*exe
 		} else if _, err := lookPath("xsel"); err == nil {
 			return exec.Command("xsel", "--clipboard", "--input"), nil
 		}
-		return nil, fmt.Errorf("no clipboard utility found (install wl-copy, xclip, or xsel)")
+		return nil, errors.New("no clipboard utility found (install wl-copy, xclip, or xsel)")
 	case "windows":
 		return exec.Command("clip"), nil
 	default:
