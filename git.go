@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,7 +68,7 @@ func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 	}
 
 	if !isGitRepo(dir) {
-		return repoContext{}, fmt.Errorf("not in a git repository")
+		return repoContext{}, errors.New("not in a git repository")
 	}
 
 	remoteURL, err := getGitRemoteURL(remoteName, dir)
