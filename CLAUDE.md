@@ -13,14 +13,14 @@ Module: `github.com/PixiBixi/gopen` | Go 1.26 | No external deps (stdlib only)
 ```bash
 # Build
 make build           # binary: ./gopen
-make build-all       # all platforms via GoReleaser
+make build-all       # cross-compile all platforms (plain go build, NOT GoReleaser)
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o gopen .  # correct since code is split across multiple files
 go build -v ./...
 
 # Test & lint
-go test ./...
-go vet ./...
-staticcheck ./...
+go test ./...                       # CI runs with -race
+go test -run TestParseArgs ./...    # single test
+golangci-lint run                   # config: .golangci.yml (v2); replaces standalone vet/staticcheck
 
 # Install
 make install         # → /usr/local/bin (requires sudo)
@@ -32,7 +32,7 @@ git tag -a vX.Y.Z -m "..."
 git push origin vX.Y.Z
 ```
 
-Pre-commit hooks run automatically: `fmt`, `vet`, `mod tidy`, `build`, `staticcheck`.
+Pre-commit hooks run automatically: `fmt`, `vet`, `mod tidy`, `build`, `staticcheck` (see `.pre-commit-config.yaml`). CI lint uses `golangci-lint` instead.
 
 ## Architecture
 
@@ -46,6 +46,8 @@ Code is split across 6 files:
 | `url.go` | `provider` struct, `providers` slice, `buildWebURL()`, `detectProvider()`, `pathJoin()`, line anchor helpers |
 | `output.go` | `openBrowser()`, `copyToClipboard()` |
 | `completion.go` | `detectShell()`, `printCompletion()`, bash/zsh/fish completion scripts |
+
+Each source file has a matching `*_test.go` (table-driven tests).
 
 The flow in `main()` is strictly sequential:
 
@@ -66,6 +68,8 @@ The flow in `main()` is strictly sequential:
 
 ## CI/CD
 
-- **CI** (`.github/workflows/ci.yml`): test + vet + staticcheck on push/PR, matrix: ubuntu/macos/windows
+- **CI** (`.github/workflows/ci.yml`): `go mod verify` + `go test -race` + build matrix (ubuntu/macos/windows) on push/PR
+- **Lint** (`.github/workflows/lint.yml`): `golangci-lint` (config `.golangci.yml`, v2 schema)
+- **Other checks**: `govulncheck.yml`, `go-format.yml`, `markdownlint.yml`, `github-actions.yml`
 - **Release** (`.github/workflows/release.yml`): automatic on push to `main` — `mathieudutour/github-tag-action` computes the next `vX.Y.Z` from conventional commits (`default_bump: false`) and tags, then GoReleaser builds multi-platform binaries + updates Homebrew tap in the same job. Renovate drives dep releases (gomod minor → `feat(deps)`, patch/digest → `fix(deps)`, github-actions → `chore(deps)` = no release). Manual `v*` tag push still works.
 - **GoReleaser config**: `.goreleaser.yml`
