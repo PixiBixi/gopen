@@ -26,7 +26,8 @@ staticcheck ./...
 make install         # → /usr/local/bin (requires sudo)
 make install-user    # → ~/bin
 
-# Release (CI handles this on v* tags)
+# Release: automatic on push to main (conventional commits drive the bump).
+# feat: -> minor, fix: -> patch. Manual tag still works as an escape hatch:
 git tag -a vX.Y.Z -m "..."
 git push origin vX.Y.Z
 ```
@@ -66,5 +67,5 @@ The flow in `main()` is strictly sequential:
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`): test + vet + staticcheck on push/PR, matrix: ubuntu/macos/windows
-- **Release** (`.github/workflows/release.yml`): triggers on `v*` tags → GoReleaser builds multi-platform binaries + updates Homebrew tap
+- **Release** (`.github/workflows/release.yml`): automatic on push to `main` — `mathieudutour/github-tag-action` computes the next `vX.Y.Z` from conventional commits (`default_bump: false`) and tags, then GoReleaser builds multi-platform binaries + updates Homebrew tap in the same job. Renovate drives dep releases (gomod minor → `feat(deps)`, patch/digest → `fix(deps)`, github-actions → `chore(deps)` = no release). Manual `v*` tag push still works.
 - **GoReleaser config**: `.goreleaser.yml`
