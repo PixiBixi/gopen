@@ -26,6 +26,7 @@ Flags:
   -v, --version        Print version information
   -c, --copy           Copy URL to clipboard instead of opening browser
   -p, --print          Print the URL to stdout and exit (no browser, no clipboard)
+                       Takes precedence over -c/--copy when both are given
   -r, --remote <name>  Git remote to use (default: origin)
   -l, --line <n[-m]>   Highlight line or range (e.g. 42 or 42-50)
       --commit <hash>  Open a specific commit or file at that commit

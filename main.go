@@ -47,6 +47,8 @@ func main() {
 
 	webURL := buildWebURL(ctx, cfg.line, cfg.commit)
 
+	// -p wins over -c: printing is the scriptable, side-effect-free mode, so
+	// the more conservative one takes precedence when both are given.
 	switch {
 	case cfg.print:
 		fmt.Println(webURL)
