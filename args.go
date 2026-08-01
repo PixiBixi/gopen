@@ -10,6 +10,7 @@ type config struct {
 	version    bool
 	remoteName string
 	copy       bool
+	print      bool
 	line       string
 	commit     string
 	completion string // "auto" = detect from $SHELL, "bash"/"zsh"/"fish" = explicit
@@ -24,6 +25,7 @@ Open a Git repository path in the browser at the current branch.
 Flags:
   -v, --version        Print version information
   -c, --copy           Copy URL to clipboard instead of opening browser
+  -p, --print          Print the URL to stdout and exit (no browser, no clipboard)
   -r, --remote <name>  Git remote to use (default: origin)
   -l, --line <n[-m]>   Highlight line or range (e.g. 42 or 42-50)
       --commit <hash>  Open a specific commit or file at that commit
@@ -33,6 +35,7 @@ Examples:
   gopen                        # current directory
   gopen main.go                # file on current branch
   gopen main.go -l 42          # file at line 42
+  gopen -p main.go             # print URL, useful in scripts
   gopen --commit abc1234       # commit page
   gopen --commit abc1234 -c    # copy commit URL
   gopen --completion           # shell completion script (auto-detected)
@@ -62,6 +65,8 @@ func parseArgs(args []string) (config, error) {
 			cfg.version = true
 		case "-c", "--copy":
 			cfg.copy = true
+		case "-p", "--print":
+			cfg.print = true
 		case "-r", "--remote":
 			v, err := nextVal()
 			if err != nil {

@@ -15,6 +15,7 @@ Open your git repository in the browser at the current branch and directory. Sim
 - 🔢 **Line numbers**: Jump to specific line or line range in files
 - 🔀 **Multiple remotes**: Choose which remote to open (origin, upstream, fork, etc.)
 - 📋 **Clipboard mode**: Copy URL instead of opening browser
+- 🖨️ **Print mode**: Print the URL to stdout for scripting, no browser or clipboard
 - 🔖 **Commit links**: Open a specific commit page or file at a given commit
 - 🐚 **Shell completion**: Built-in completion for bash, zsh, and fish
 - 🔄 Converts git:// and ssh:// URLs to HTTPS automatically
@@ -87,6 +88,10 @@ gopen --remote fork
 gopen -c
 gopen --copy
 
+# Print URL to stdout instead of opening (scripting)
+gopen -p
+gopen --print main.go
+
 # Open file at specific line (all syntaxes work)
 gopen -l 42 main.go
 gopen main.go -l42
@@ -141,6 +146,15 @@ gopen -r upstream
 ```bash
 gopen -c src/main.go
 # → Output: URL copied to clipboard: https://github.com/user/repo/tree/main/src/main.go
+```
+
+### Print URL for scripting
+```bash
+gopen -p src/main.go
+# → Output: https://github.com/user/repo/tree/main/src/main.go
+
+# Useful in pipelines, e.g. open in a specific browser:
+open -a "Google Chrome" "$(gopen -p)"
 ```
 
 ### From subdirectory on feature branch
