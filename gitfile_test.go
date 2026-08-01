@@ -409,6 +409,23 @@ func TestBranchIsBorn(t *testing.T) {
 			t.Error("a fresh git init has no refs, so no branch is born")
 		}
 	})
+
+	t.Run("zero-byte loose ref", func(t *testing.T) {
+		dir := t.TempDir()
+		mkdirAll(t, filepath.Join(dir, "refs", "heads"))
+		writeFile(t, filepath.Join(dir, "refs", "heads", "empty"), "")
+		if branchIsBorn(dir, "empty") {
+			t.Error("a zero-byte loose ref is not a real commit; it must not count as born")
+		}
+	})
+
+	t.Run("directory named like the branch", func(t *testing.T) {
+		dir := t.TempDir()
+		mkdirAll(t, filepath.Join(dir, "refs", "heads", "feature", "x"))
+		if branchIsBorn(dir, "feature") {
+			t.Error("a directory shadowing the ref path is not a loose ref; it must not count as born")
+		}
+	})
 }
 
 // --- discoverGitDir ---

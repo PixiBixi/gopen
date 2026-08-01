@@ -254,7 +254,7 @@ const (
 // answers "not born" rather than guessing.
 func branchIsBorn(commonDir, branch string) bool {
 	ref := headRefPrefix + branch
-	if _, err := os.Lstat(filepath.Join(commonDir, filepath.FromSlash(ref))); err == nil {
+	if info, err := os.Lstat(filepath.Join(commonDir, filepath.FromSlash(ref))); err == nil && info.Mode().IsRegular() && info.Size() > 0 {
 		return true
 	}
 
