@@ -66,11 +66,12 @@ func parseGitConfig(r io.Reader) ([]configEntry, error) {
 			line = line[:len(line)-1] + sc.Text()
 		}
 
-		name, value, err := parseKeyValue(line)
+		e, err := parseKeyValue(line)
 		if err != nil {
 			return nil, fmt.Errorf("line %d: %w", lineNo, err)
 		}
-		entries = append(entries, configEntry{key: section + "." + name, value: value})
+		e.key = section + "." + e.key
+		entries = append(entries, e)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("reading git config: %w", err)
@@ -129,35 +130,58 @@ func unescapeSubsection(s string) string {
 	return b.String()
 }
 
-// parseKeyValue splits "name = value" into its parts. A bare name is an
-// implicit boolean true, which is how git reads it.
-func parseKeyValue(line string) (name, value string, err error) {
-	rawName, rawValue, hasValue := strings.Cut(line, "=")
-	if !hasValue {
-		name = strings.ToLower(strings.TrimSpace(stripInlineComment(line)))
-		if name == "" {
-			return "", "", errors.New("empty key name")
-		}
-		return name, "true", nil
+// parseKeyValue splits "name = value" into its parts, mirroring git's
+// get_value(): the name is a run of key characters, optional blanks may follow,
+// and then the line must either end or continue with '='. Anything else is a
+// fatal "bad config line" in git — `bad_key = 1` and `key # comment` both are —
+// so it is an error here too rather than a value git would never report.
+//
+// The returned entry carries only the unqualified name; the caller prefixes the
+// section.
+//
+// A bare name with no '=' is refused, even though git parses it happily as a
+// NULL value. git records no *string* for such a key, so it dies with "missing
+// value for '<key>'" the moment any consumer wants one — and it is git's own
+// remote code that wants one, for every remote in scope, not just the one being
+// asked about: a stray `[remote "x"]\n url` makes `git remote get-url origin`
+// exit 128. Modelling which of git's callbacks demand a string is far more
+// surface than the case is worth, so the whole file is refused and the git
+// binary answers. Bare keys are a hand-written spelling git itself never emits,
+// so the lost optimization is theoretical.
+func parseKeyValue(line string) (configEntry, error) {
+	end := 0
+	for end < len(line) && isKeyChar(line[end]) {
+		end++
+	}
+	// git requires the *first* character to be a letter (isalpha), even though
+	// digits and '-' are fine later on.
+	if end == 0 || !isASCIILetter(line[0]) {
+		return configEntry{}, fmt.Errorf("invalid key name in %q", line)
+	}
+	name := strings.ToLower(line[:end])
+
+	rest := strings.TrimLeft(line[end:], " \t")
+	if rest == "" {
+		return configEntry{}, fmt.Errorf("key %q has no value", name)
+	}
+	if rest[0] != '=' {
+		return configEntry{}, fmt.Errorf("unexpected %q after key %q", rest[0], name)
 	}
 
-	name = strings.ToLower(strings.TrimSpace(rawName))
-	if name == "" {
-		return "", "", errors.New("empty key name")
-	}
-	value, err = parseValue(strings.TrimSpace(rawValue))
+	value, err := parseValue(strings.TrimSpace(rest[1:]))
 	if err != nil {
-		return "", "", err
+		return configEntry{}, err
 	}
-	return name, value, nil
+	return configEntry{key: name, value: value}, nil
 }
 
-// stripInlineComment drops everything from the first unquoted # or ;.
-func stripInlineComment(s string) string {
-	if i := strings.IndexAny(s, "#;"); i >= 0 {
-		return s[:i]
-	}
-	return s
+// isKeyChar mirrors git's iskeychar(): ASCII alphanumerics plus '-'.
+func isKeyChar(c byte) bool {
+	return isASCIILetter(c) || (c >= '0' && c <= '9') || c == '-'
+}
+
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // parseValue interprets a config value: quoted spans keep their whitespace and
@@ -214,13 +238,69 @@ func firstConfigValue(entries []configEntry, key string) (string, bool) {
 	return "", false
 }
 
-const headRefPrefix = "refs/heads/"
+const (
+	headRefPrefix = "refs/heads/"
+	// detachedHEAD is what `git rev-parse --abbrev-ref HEAD` prints when HEAD
+	// is not on a branch. git rejects "HEAD" as a branch name, so it is
+	// unambiguous as a sentinel.
+	detachedHEAD = "HEAD"
+)
+
+// branchIsBorn reports whether refs/heads/<branch> actually resolves. Both the
+// loose ref and packed-refs live in the common dir, shared by every linked
+// worktree.
+//
+// A false negative only costs a fallback to the git binary, so every read error
+// answers "not born" rather than guessing.
+func branchIsBorn(commonDir, branch string) bool {
+	ref := headRefPrefix + branch
+	if _, err := os.Lstat(filepath.Join(commonDir, filepath.FromSlash(ref))); err == nil {
+		return true
+	}
+
+	f, err := os.Open(filepath.Join(commonDir, "packed-refs"))
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		// "<oid> <refname>", with "# " header lines and "^<oid>" peel lines.
+		line := sc.Text()
+		if line == "" || line[0] == '#' || line[0] == '^' {
+			continue
+		}
+		if _, name, ok := strings.Cut(line, " "); ok && name == ref {
+			return true
+		}
+	}
+	return false
+}
 
 // branchFromHEAD reads gitDir/HEAD and returns the short branch name.
 // A detached HEAD yields the literal "HEAD", which is what
 // `git rev-parse --abbrev-ref HEAD` prints in that state.
 func branchFromHEAD(gitDir string) (string, error) {
-	raw, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	path := filepath.Join(gitDir, "HEAD")
+
+	// core.preferSymlinkRefs makes HEAD a symlink to the loose ref file, and
+	// os.ReadFile would follow it and return that file's contents — 40 hex
+	// characters, which reads as a detached HEAD and reports the branch as
+	// "HEAD" where git reports the real name. validateHeadRef deliberately
+	// accepts this layout, so the refusal has to happen here.
+	//
+	// git 2.54 deprecates the option, so resolving the link properly is not
+	// worth the code: refuse and let the git binary answer.
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat HEAD: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("HEAD is a symlink (core.preferSymlinkRefs), which this cannot resolve")
+	}
+
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("failed to read HEAD: %w", err)
 	}
@@ -245,23 +325,40 @@ func branchFromHEAD(gitDir string) (string, error) {
 	}
 
 	if isHexSHA(head) {
-		return "HEAD", nil // detached
+		return detachedHEAD, nil
 	}
 	return "", fmt.Errorf("unrecognized HEAD content: %q", head)
 }
 
-// isValidBranchName reports whether s is safe to return as a branch name.
-// It rejects the empty string plus whitespace and other ASCII control
-// characters (including DEL), which is the minimum git itself enforces on
-// ref names. Failing this check means the HEAD content isn't fully
-// understood, so the caller errors out and falls back to the git binary
-// instead of risking a value git would never produce.
+// isValidBranchName reports whether s is a name git itself would accept under
+// refs/heads/. It mirrors check_refname_format(): no empty path component, no
+// component starting with '.' or ending in ".lock", no "..", no "@{", no
+// trailing '.' or '/', and none of the characters git reserves for revision
+// syntax — ASCII control characters and space, DEL, and ~ ^ : ? * [ \.
+//
+// The whole grammar is checked, not just the control characters, because
+// failing this test is how the caller learns the HEAD content isn't fully
+// understood: it then falls back to the git binary. Being stricter than git
+// costs a fork; being looser would risk returning a name git never produces.
 func isValidBranchName(s string) bool {
-	if s == "" {
+	if s == "" || strings.Contains(s, "..") || strings.Contains(s, "@{") {
+		return false
+	}
+	if strings.HasSuffix(s, ".") || strings.HasSuffix(s, "/") {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] <= ' ' || s[i] == 0x7f {
+		switch c := s[i]; c {
+		case '~', '^', ':', '?', '*', '[', '\\', 0x7f:
+			return false
+		default:
+			if c <= ' ' {
+				return false
+			}
+		}
+	}
+	for part := range strings.SplitSeq(s, "/") {
+		if part == "" || part[0] == '.' || strings.HasSuffix(part, ".lock") {
 			return false
 		}
 	}
@@ -326,31 +423,6 @@ var safeRepoExtensions = map[string]bool{
 	"noop-v1":            true,
 }
 
-// discoverGitDir walks up from start until it finds a .git entry, and returns
-// paths only if it is certain they name the same repository `git rev-parse`
-// would name.
-//
-// A .git directory is the normal case. A .git file holds "gitdir: <path>" and
-// appears in linked worktrees and submodules; there, HEAD lives in gitDir while
-// config lives in the shared commonDir, so the two are returned separately.
-//
-// workTree is the directory holding the .git entry. Symlinks are deliberately
-// left unresolved so that workTree and the caller's target path stay in the
-// same namespace; `git rev-parse --show-toplevel` reports the real path, so the
-// two can differ textually while naming the same directory.
-//
-// Known and accepted gap: git stops the walk at a filesystem boundary unless
-// GIT_DISCOVERY_ACROSS_FILESYSTEM is set, and this walk does not, because
-// st_dev is not portable through the standard library. It only matters when a
-// mount point sits between the target and the repository root.
-func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error) {
-	l, err := discoverRepoLayout(start)
-	if err != nil {
-		return "", "", "", err
-	}
-	return l.gitDir, l.commonDir, l.workTree, nil
-}
-
 // repoLayout is everything the walk learned about a repository, including the
 // shared config it had to parse anyway to vet it. Carrying the entries here is
 // what keeps the config file parsed once per run instead of once per consumer.
@@ -361,7 +433,23 @@ type repoLayout struct {
 	config    []configEntry // <commonDir>/config, in file order
 }
 
-// discoverRepoLayout is the walk itself; see discoverGitDir for the contract.
+// discoverRepoLayout walks up from start until it finds a .git entry, and
+// returns paths only if it is certain they name the same repository
+// `git rev-parse` would name.
+//
+// A .git directory is the normal case. A .git file holds "gitdir: <path>" and
+// appears in linked worktrees and submodules; there, HEAD lives in gitDir while
+// config lives in the shared commonDir, so the two are returned separately.
+//
+// workTree is the directory holding the .git entry. The walk resolves no
+// symlinks of its own: start is expected to arrive already resolved (see
+// resolveTarget), so workTree comes back in the same namespace as the caller's
+// target and as `git rev-parse --show-toplevel`.
+//
+// Known and accepted gap: git stops the walk at a filesystem boundary unless
+// GIT_DISCOVERY_ACROSS_FILESYSTEM is set, and this walk does not, because
+// st_dev is not portable through the standard library. It only matters when a
+// mount point sits between the target and the repository root.
 func discoverRepoLayout(start string) (repoLayout, error) {
 	if name := gitDiscoveryEnvOverride(); name != "" {
 		return repoLayout{}, fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
@@ -732,10 +820,15 @@ func needsGitFallback(gitDir, commonDir, remoteName string) bool {
 	if gitDiscoveryEnvOverride() != "" {
 		return true
 	}
-	// GIT_CONFIG_COUNT/KEY/VALUE inject config straight from the environment,
-	// including url.*.insteadOf, and no file scan can see it.
-	if os.Getenv("GIT_CONFIG_COUNT") != "" {
-		return true
+	// Both of git's environment config channels inject settings — including
+	// url.*.insteadOf — that no file scan can see. GIT_CONFIG_COUNT/KEY/VALUE
+	// is the documented one; GIT_CONFIG_PARAMETERS is what `git -c ...` exports
+	// to its subprocesses, which is exactly how gopen runs when invoked as the
+	// documented git alias.
+	for _, name := range []string{"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} {
+		if os.Getenv(name) != "" {
+			return true
+		}
 	}
 
 	s := configScanner{gitDir: gitDir, remoteURLKey: "remote." + remoteName + ".url"}
@@ -779,15 +872,35 @@ func outerConfigScopePaths() []string {
 	}
 	// git reads both the XDG file and ~/.gitconfig, and falls back to
 	// ~/.config/git/config when XDG_CONFIG_HOME is unset.
+	home, hasHome := gitHomeDir()
 	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
 		paths = append(paths, filepath.Join(xdg, "git", "config"))
-	} else if home, err := os.UserHomeDir(); err == nil {
+	} else if hasHome {
 		paths = append(paths, filepath.Join(home, ".config", "git", "config"))
 	}
-	if home, err := os.UserHomeDir(); err == nil {
+	if hasHome {
 		paths = append(paths, filepath.Join(home, ".gitconfig"))
 	}
 	return paths
+}
+
+// gitHomeDir returns the directory git means by "~" and by $HOME.
+//
+// $HOME comes first because that is the only variable git interpolates. On
+// Windows os.UserHomeDir() reads %USERPROFILE% instead, and the two differ
+// under cmd.exe or PowerShell (git's own startup synthesizes HOME there) and
+// whenever HOME is overridden; scanning the wrong ~/.gitconfig would miss an
+// insteadOf and hand back a URL git does not use. Both the config scan and the
+// "~/" expansion go through here so they cannot drift apart again.
+func gitHomeDir() (string, bool) {
+	if home := os.Getenv("HOME"); home != "" {
+		return home, true
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", false
+	}
+	return home, true
 }
 
 // repoConfigScopePaths lists the repository's own config files: the shared one
@@ -970,9 +1083,9 @@ func includeDirective(key string) (cond string, ok bool) {
 // file carrying the directive. The second result is false when the target
 // cannot be named with certainty, which sends the caller to git.
 func (s *configScanner) includeTarget(value, from string) (string, bool) {
-	// A bare `path` key is fatal in git ("missing value for include.path"), and
-	// an implicit boolean is indistinguishable from `path = true` once parsed.
-	// Refuse both rather than resolve the wrong file.
+	// `path =` with nothing after it, and a literal `path = true`, are both
+	// indistinguishable from the implicit boolean git dies on ("missing value
+	// for include.path"). Refuse rather than resolve the wrong file.
 	if value == "" || value == "true" {
 		return "", false
 	}
@@ -994,7 +1107,7 @@ func (s *configScanner) includeTarget(value, from string) (string, bool) {
 }
 
 // expandHome applies git's interpolate_path with real_home off: only "~/" is
-// expanded, and only from $HOME, which is the single source git itself reads.
+// expanded, and only from the home directory git itself uses (see gitHomeDir).
 // "~other/" needs the password database and "%(prefix)/" needs git's
 // compiled-in install prefix, so both are refused.
 func expandHome(p string) (string, bool) {
@@ -1008,8 +1121,8 @@ func expandHome(p string) (string, bool) {
 	if rest != "" && rest[0] != '/' {
 		return "", false
 	}
-	home := os.Getenv("HOME")
-	if home == "" {
+	home, ok := gitHomeDir()
+	if !ok {
 		return "", false
 	}
 	return home + rest, true
@@ -1121,7 +1234,11 @@ func (s *configScanner) expandRealHome(p string) (string, bool) {
 	if !ok || !strings.HasPrefix(p, "~") {
 		return expanded, ok
 	}
-	home, err := filepath.EvalSymlinks(os.Getenv("HOME"))
+	rawHome, ok := gitHomeDir()
+	if !ok {
+		return "", false
+	}
+	home, err := filepath.EvalSymlinks(rawHome)
 	if err != nil {
 		// git resolves it with die_on_error set, so it would abort here.
 		s.forced = true
@@ -1134,7 +1251,7 @@ func (s *configScanner) expandRealHome(p string) (string, bool) {
 // no subprocess. It errors rather than guessing whenever the on-disk state is
 // not something it fully understands, so the caller can fall back to git.
 func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error) {
-	dir, err := containingDir(targetPath)
+	dir, target, err := resolveTarget(targetPath)
 	if err != nil {
 		return repoContext{}, err
 	}
@@ -1155,6 +1272,18 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 		return repoContext{}, err
 	}
 
+	// Unborn branch: HEAD names a branch that has no commit yet, right after
+	// `git init` or `git checkout --orphan`. Deliberate choice, checked against
+	// git 2.54: `git branch --show-current` prints the name but
+	// `git rev-parse --abbrev-ref HEAD` exits 128, and rev-parse is what the
+	// subprocess path runs and what gopen has always matched. Answering here
+	// would be a silent divergence *and* a URL for a branch no forge has yet,
+	// so refuse and let the fallback produce the same error gopen returned
+	// before the fast path existed.
+	if branch != detachedHEAD && !branchIsBorn(layout.commonDir, branch) {
+		return repoContext{}, fmt.Errorf("branch %q has no commit yet", branch)
+	}
+
 	// firstConfigValue, not lastConfigValue: `git remote get-url` returns a
 	// remote's *first* url line.
 	remoteURL, ok := firstConfigValue(layout.config, "remote."+remoteName+".url")
@@ -1162,7 +1291,7 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 		return repoContext{}, fmt.Errorf("no URL configured for remote %q", remoteName)
 	}
 
-	relPath, err := relativeToRoot(layout.workTree, targetPath)
+	relPath, err := relativeToRoot(layout.workTree, target)
 	if err != nil {
 		return repoContext{}, err
 	}
@@ -1172,6 +1301,35 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 		branch:  branch,
 		relPath: relPath,
 	}, nil
+}
+
+// resolveTarget returns the directory the walk must start from and the target
+// path expressed in that same namespace.
+//
+// Both come back symlink-resolved because that is what git does: it chdirs into
+// the directory it was pointed at and calls getcwd(), which always reports the
+// physical path. Leaving the directory unresolved would discover the repository
+// holding a symlink rather than the one holding its destination — a plausible
+// URL for the wrong repository entirely.
+//
+// The final component is resolved only when it *is* the directory. A symlinked
+// target file keeps its own name: git resolves the directory it runs in, never
+// the pathspec, so `gopen b/link.txt` reports b/link.txt and not the file it
+// points at.
+func resolveTarget(targetPath string) (dir, target string, err error) {
+	dir, err = containingDir(targetPath)
+	if err != nil {
+		return "", "", err
+	}
+
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to resolve %q: %w", dir, err)
+	}
+	if dir == targetPath {
+		return resolved, resolved, nil
+	}
+	return resolved, filepath.Join(resolved, filepath.Base(targetPath)), nil
 }
 
 // containingDir returns targetPath itself when it is a directory, otherwise its

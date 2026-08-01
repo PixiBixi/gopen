@@ -71,7 +71,11 @@ func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 
 // repoContextViaGit is the subprocess fallback: four git invocations.
 func repoContextViaGit(targetPath, remoteName string) (repoContext, error) {
-	dir, err := containingDir(targetPath)
+	// Same resolution the fast path applies, from the same helper so the two
+	// cannot drift: git reports a symlink-resolved root, so the target has to
+	// be expressed in the resolved namespace too or relPath fills with "..".
+	// On macOS /var is a symlink to /private/var, which makes this routine.
+	dir, resolvedTarget, err := resolveTarget(targetPath)
 	if err != nil {
 		return repoContext{}, err
 	}
@@ -93,17 +97,6 @@ func repoContextViaGit(targetPath, remoteName string) (repoContext, error) {
 	repoRoot, err := getRepoRoot(dir)
 	if err != nil {
 		return repoContext{}, err
-	}
-
-	// git reports a symlink-resolved root, so resolve the target too or the two
-	// paths end up in different namespaces and relPath fills with "..". On
-	// macOS /var is a symlink to /private/var, which makes this routine.
-	//
-	// The fast path needs no such fix: it derives the work tree by walking up
-	// from the target, so both already live in the caller's namespace.
-	resolvedTarget := targetPath
-	if r, err := filepath.EvalSymlinks(targetPath); err == nil {
-		resolvedTarget = r
 	}
 
 	relPath, err := relativeToRoot(repoRoot, resolvedTarget)

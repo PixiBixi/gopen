@@ -17,47 +17,42 @@ func TestParseGitConfig(t *testing.T) {
 		{
 			name:  "simple section and key",
 			input: "[core]\n\tbare = false\n",
-			want:  []configEntry{{"core.bare", "false"}},
+			want:  []configEntry{{key: "core.bare", value: "false"}},
 		},
 		{
 			name:  "quoted subsection preserves case",
 			input: "[remote \"Origin\"]\n\turl = https://example.com/r.git\n",
-			want:  []configEntry{{"remote.Origin.url", "https://example.com/r.git"}},
+			want:  []configEntry{{key: "remote.Origin.url", value: "https://example.com/r.git"}},
 		},
 		{
 			name:  "dotted short-form subsection is lowercased",
 			input: "[branch.Main]\n\tremote = origin\n",
-			want:  []configEntry{{"branch.main.remote", "origin"}},
+			want:  []configEntry{{key: "branch.main.remote", value: "origin"}},
 		},
 		{
 			name:  "section and key names are case-insensitive",
 			input: "[CORE]\n\tBare = true\n",
-			want:  []configEntry{{"core.bare", "true"}},
-		},
-		{
-			name:  "key without value is an implicit true",
-			input: "[core]\n\tbare\n",
-			want:  []configEntry{{"core.bare", "true"}},
+			want:  []configEntry{{key: "core.bare", value: "true"}},
 		},
 		{
 			name:  "hash and semicolon comments are ignored",
 			input: "# lead\n[core]\n; mid\n\tbare = false # trail\n",
-			want:  []configEntry{{"core.bare", "false"}},
+			want:  []configEntry{{key: "core.bare", value: "false"}},
 		},
 		{
 			name:  "quoted value keeps inner spaces and hash",
 			input: "[user]\n\tname = \"Ada # Lovelace\"\n",
-			want:  []configEntry{{"user.name", "Ada # Lovelace"}},
+			want:  []configEntry{{key: "user.name", value: "Ada # Lovelace"}},
 		},
 		{
 			name:  "escape sequences inside a quoted value",
 			input: "[x]\n\ty = \"a\\tb\\nc\\\\d\\\"e\"\n",
-			want:  []configEntry{{"x.y", "a\tb\nc\\d\"e"}},
+			want:  []configEntry{{key: "x.y", value: "a\tb\nc\\d\"e"}},
 		},
 		{
 			name:  "line continuation joins values",
 			input: "[x]\n\ty = one\\\ntwo\n",
-			want:  []configEntry{{"x.y", "onetwo"}},
+			want:  []configEntry{{key: "x.y", value: "onetwo"}},
 		},
 		// The continuation cases below assert the exact bytes git 2.54 produces;
 		// each was verified against `git config --file <f> --list -z` before
@@ -67,61 +62,61 @@ func TestParseGitConfig(t *testing.T) {
 		{
 			name:  "continuation preserves the next line's leading whitespace",
 			input: "[x]\n\ty = one\\\n   two\n",
-			want:  []configEntry{{"x.y", "one   two"}},
+			want:  []configEntry{{key: "x.y", value: "one   two"}},
 		},
 		{
 			name:  "continuation inside a quoted value preserves leading whitespace",
 			input: "[x]\n\ty = \"one\\\n   two\"\n",
-			want:  []configEntry{{"x.y", "one   two"}},
+			want:  []configEntry{{key: "x.y", value: "one   two"}},
 		},
 		{
 			name:  "continuation preserves leading tabs in a URL",
 			input: "[remote \"origin\"]\n\turl = https://example.com/a/\\\n\t\tb.git\n",
-			want:  []configEntry{{"remote.origin.url", "https://example.com/a/\t\tb.git"}},
+			want:  []configEntry{{key: "remote.origin.url", value: "https://example.com/a/\t\tb.git"}},
 		},
 		{
 			// Trailing run of 3: one escaped pair plus a continuation marker.
 			name:  "odd backslash run of three continues the line",
 			input: "[x]\n\ty = a\\\\\\\nb\n",
-			want:  []configEntry{{"x.y", "a\\b"}},
+			want:  []configEntry{{key: "x.y", value: "a\\b"}},
 		},
 		{
 			// Trailing run of 5: two escaped pairs plus a continuation marker.
 			name:  "odd backslash run of five continues the line",
 			input: "[x]\n\ty = a\\\\\\\\\\\nb\n",
-			want:  []configEntry{{"x.y", "a\\\\b"}},
+			want:  []configEntry{{key: "x.y", value: "a\\\\b"}},
 		},
 		{
 			// Even run: no continuation, the next line is an ordinary key.
 			name:  "even backslash run does not continue the line",
 			input: "[x]\n\ty = a\\\\\n\tb = c\n",
 			want: []configEntry{
-				{"x.y", "a\\"},
-				{"x.b", "c"},
+				{key: "x.y", value: "a\\"},
+				{key: "x.b", value: "c"},
 			},
 		},
 		{
 			name:  "multiple values for the same key keep file order",
 			input: "[remote \"origin\"]\n\turl = first\n\tfetch = f\n\turl = second\n",
 			want: []configEntry{
-				{"remote.origin.url", "first"},
-				{"remote.origin.fetch", "f"},
-				{"remote.origin.url", "second"},
+				{key: "remote.origin.url", value: "first"},
+				{key: "remote.origin.fetch", value: "f"},
+				{key: "remote.origin.url", value: "second"},
 			},
 		},
 		{
 			name:  "repeated sections are concatenated in order",
 			input: "[remote \"origin\"]\n\turl = a\n[core]\n\tbare = false\n[remote \"origin\"]\n\turl = b\n",
 			want: []configEntry{
-				{"remote.origin.url", "a"},
-				{"core.bare", "false"},
-				{"remote.origin.url", "b"},
+				{key: "remote.origin.url", value: "a"},
+				{key: "core.bare", value: "false"},
+				{key: "remote.origin.url", value: "b"},
 			},
 		},
 		{
 			name:  "blank lines and stray whitespace",
 			input: "\n  [core]  \n\n   bare   =   false   \n\n",
-			want:  []configEntry{{"core.bare", "false"}},
+			want:  []configEntry{{key: "core.bare", value: "false"}},
 		},
 		{
 			name:  "empty input yields no entries",
@@ -159,6 +154,27 @@ func TestParseGitConfig_Malformed(t *testing.T) {
 		{"key outside any section", "bare = false\n"},
 		{"unterminated quoted value", "[user]\n\tname = \"unclosed\n"},
 		{"empty section name", "[]\n"},
+
+		// git's iskeychar() is ASCII alphanumerics plus '-', and the name must
+		// start with a letter. Each of these makes git 2.54 abort the whole
+		// command with "fatal: bad config line N", verified by appending it to
+		// a real .git/config and running `git rev-parse --git-dir`.
+		{"underscore in a key name", "[foo]\n\tbad_key = 1\n"},
+		{"dot in a key name", "[foo]\n\tbad.key = 1\n"},
+		{"space inside a key name", "[foo]\n\tbad key = 1\n"},
+		{"key starting with a digit", "[foo]\n\t1abc = 2\n"},
+		{"key starting with a dash", "[foo]\n\t-abc = 2\n"},
+		{"comment after a valueless key", "[foo]\n\tsomething # hi\n"},
+		{"quote after a valueless key", "[foo]\n\tsomething \"x\"\n"},
+		{"line starting with an equals sign", "[foo]\n\t= 1\n"},
+
+		// A bare key is legal git syntax — it records a NULL value — but git
+		// dies with "missing value for '<key>'" as soon as anything reads it as
+		// a string, and `git remote get-url` reads *every* remote.*.url that
+		// way. Refusing the file is far less surface than tracking which keys
+		// are strings, and git never writes a bare key itself.
+		{"valueless key", "[core]\n\tbare\n"},
+		{"valueless key in a remote section", "[remote \"x\"]\n\turl\n"},
 	}
 
 	for _, tt := range tests {
@@ -172,9 +188,9 @@ func TestParseGitConfig_Malformed(t *testing.T) {
 
 func TestFirstConfigValue(t *testing.T) {
 	entries := []configEntry{
-		{"remote.origin.url", "first"},
-		{"core.bare", "false"},
-		{"remote.origin.url", "second"},
+		{key: "remote.origin.url", value: "first"},
+		{key: "core.bare", value: "false"},
+		{key: "remote.origin.url", value: "second"},
 	}
 
 	t.Run("returns the first match, matching git remote get-url", func(t *testing.T) {
@@ -286,6 +302,28 @@ func TestBranchFromHEAD(t *testing.T) {
 			head: "ref:\trefs/heads/main\n",
 			want: "main",
 		},
+
+		// Ref grammar. Every rejection below was checked with
+		// `git check-ref-format refs/heads/<name>`, which refuses each one, so
+		// no repository can ever legitimately have HEAD pointing there.
+		{name: "double dot", head: "ref: refs/heads/a..b\n", wantErr: true},
+		{name: "trailing dot", head: "ref: refs/heads/foo.\n", wantErr: true},
+		{name: "trailing slash", head: "ref: refs/heads/foo/\n", wantErr: true},
+		{name: "empty path component", head: "ref: refs/heads/a//b\n", wantErr: true},
+		{name: "component starting with a dot", head: "ref: refs/heads/x/.y\n", wantErr: true},
+		{name: "lock suffix", head: "ref: refs/heads/end.lock\n", wantErr: true},
+		{name: "reflog syntax", head: "ref: refs/heads/a@{b\n", wantErr: true},
+		{name: "tilde", head: "ref: refs/heads/til~de\n", wantErr: true},
+		{name: "caret", head: "ref: refs/heads/car^et\n", wantErr: true},
+		{name: "colon", head: "ref: refs/heads/co:lon\n", wantErr: true},
+		{name: "question mark", head: "ref: refs/heads/qu?mark\n", wantErr: true},
+		{name: "asterisk", head: "ref: refs/heads/star*\n", wantErr: true},
+		{name: "open bracket", head: "ref: refs/heads/brack[et\n", wantErr: true},
+		{name: "backslash", head: "ref: refs/heads/back\\slash\n", wantErr: true},
+		// ...and the names git *does* accept must still come through.
+		{name: "leading dash is a legal branch name", head: "ref: refs/heads/-dash\n", want: "-dash"},
+		{name: "a lone at-sign is a legal branch name", head: "ref: refs/heads/@\n", want: "@"},
+		{name: "non-ASCII is a legal branch name", head: "ref: refs/heads/café\n", want: "café"},
 	}
 
 	for _, tt := range tests {
@@ -315,9 +353,75 @@ func TestBranchFromHEAD(t *testing.T) {
 			t.Error("expected an error for a missing HEAD file")
 		}
 	})
+
+	// core.preferSymlinkRefs. os.ReadFile follows the link and hands back the
+	// loose ref's 40 hex characters, which used to read as a detached HEAD and
+	// return "HEAD" where git returns the real branch name.
+	t.Run("a symlinked HEAD errors instead of reading the ref file", func(t *testing.T) {
+		dir := t.TempDir()
+		mkdirAll(t, filepath.Join(dir, "refs", "heads"))
+		writeFile(t, filepath.Join(dir, "refs", "heads", "main"),
+			"9f2c1b7e4a8d3f6019b5c2e7a4d8f1b3c6e9a2d5\n")
+		if err := os.Symlink(filepath.Join("refs", "heads", "main"), filepath.Join(dir, "HEAD")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if got, err := branchFromHEAD(dir); err == nil {
+			t.Errorf("branchFromHEAD() = %q, want an error so the caller falls back to git", got)
+		}
+	})
+}
+
+func TestBranchIsBorn(t *testing.T) {
+	const sha = "9f2c1b7e4a8d3f6019b5c2e7a4d8f1b3c6e9a2d5"
+
+	t.Run("loose ref", func(t *testing.T) {
+		dir := t.TempDir()
+		mkdirAll(t, filepath.Join(dir, "refs", "heads", "feature"))
+		writeFile(t, filepath.Join(dir, "refs", "heads", "feature", "x"), sha+"\n")
+		if !branchIsBorn(dir, "feature/x") {
+			t.Error("a loose ref must count as born")
+		}
+		if branchIsBorn(dir, "feature/y") {
+			t.Error("an absent ref must not count as born")
+		}
+	})
+
+	t.Run("packed ref", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "packed-refs"),
+			"# pack-refs with: peeled fully-peeled sorted \n"+
+				sha+" refs/heads/main\n"+
+				sha+" refs/tags/v1\n^"+sha+"\n")
+		if !branchIsBorn(dir, "main") {
+			t.Error("a packed ref must count as born")
+		}
+		if branchIsBorn(dir, "v1") {
+			t.Error("a tag must not satisfy a branch lookup")
+		}
+		if branchIsBorn(dir, "other") {
+			t.Error("an absent ref must not count as born")
+		}
+	})
+
+	t.Run("nothing at all", func(t *testing.T) {
+		if branchIsBorn(t.TempDir(), "main") {
+			t.Error("a fresh git init has no refs, so no branch is born")
+		}
+	})
 }
 
 // --- discoverGitDir ---
+
+// discoverGitDir flattens discoverRepoLayout to the three paths these tests
+// assert on. It lives here rather than in gitfile.go so the binary does not
+// ship an adapter only the tests call.
+func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error) {
+	l, err := discoverRepoLayout(start)
+	if err != nil {
+		return "", "", "", err
+	}
+	return l.gitDir, l.commonDir, l.workTree, nil
+}
 
 func assertFileExists(t *testing.T, path string) {
 	t.Helper()
@@ -802,9 +906,9 @@ func TestDiscoverGitDir_GitfilePointer(t *testing.T) {
 
 func TestLastConfigValue(t *testing.T) {
 	entries := []configEntry{
-		{"core.bare", "false"},
-		{"remote.origin.url", "a"},
-		{"core.bare", "true"},
+		{key: "core.bare", value: "false"},
+		{key: "remote.origin.url", value: "a"},
+		{key: "core.bare", value: "true"},
 	}
 	tests := []struct {
 		name      string
@@ -1595,6 +1699,127 @@ func TestDifferential_FastPathMatchesGit(t *testing.T) {
 				return filepath.Join(link, "pkg", "x.go")
 			},
 		},
+		{
+			// The target *itself* is the symlink. git resolves the directory it
+			// runs in, never the pathspec, so both paths must report the link's
+			// own location — b/link.txt, not a/f.txt.
+			name:   "target is a symlinked file",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				writeFile(t, filepath.Join(mkdirAll(t, filepath.Join(root, "a")), "f.txt"), "")
+
+				link := filepath.Join(mkdirAll(t, filepath.Join(root, "b")), "link.txt")
+				if err := os.Symlink(filepath.Join("..", "a", "f.txt"), link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link
+			},
+		},
+		{
+			// Same, but the link leaves the repository entirely. Following it
+			// would answer with the *other* repository's remote.
+			name:   "target is a symlink into another repository",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				other := newTmpGitRepo(t)
+				runGit(t, other, "remote", "add", "origin", "https://github.com/example/other.git")
+				writeFile(t, filepath.Join(other, "f.txt"), "")
+
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				link := filepath.Join(root, "link.txt")
+				if err := os.Symlink(filepath.Join(other, "f.txt"), link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link
+			},
+		},
+		{
+			// The mirror image of the two above: when the symlink *is* a
+			// directory, git chdirs into it and getcwd() reports the
+			// destination, so both paths must name a/sub, not b/link. Discovery
+			// has to start from the resolved directory for that to hold.
+			name:   "target is a symlinked directory",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				mkdirAll(t, filepath.Join(root, "a", "sub"))
+
+				link := filepath.Join(mkdirAll(t, filepath.Join(root, "b")), "link")
+				if err := os.Symlink(filepath.Join("..", "a", "sub"), link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link
+			},
+		},
+		{
+			// And the sharp end of it: the link leaves the repository, so the
+			// answer is the *other* repository's remote. Discovering from the
+			// unresolved path would hand back this repository's URL instead —
+			// a plausible URL for the wrong repository.
+			name:   "target is a symlinked directory in another repository",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				other := newTmpGitRepo(t)
+				runGit(t, other, "remote", "add", "origin", "https://github.com/example/other.git")
+				mkdirAll(t, filepath.Join(other, "deep"))
+
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				link := filepath.Join(root, "link")
+				if err := os.Symlink(filepath.Join(other, "deep"), link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return link
+			},
+		},
+		{
+			// core.preferSymlinkRefs makes .git/HEAD a symlink to the loose ref,
+			// so reading it yields 40 hex characters. That used to look like a
+			// detached HEAD and report the branch as "HEAD" while git reported
+			// "main". Deprecated in git 2.54, hence a refusal rather than
+			// support.
+			name:      "HEAD is a symlink (core.preferSymlinkRefs)",
+			remote:    "origin",
+			fallsBack: true,
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				runGit(t, root, "config", "core.preferSymlinkRefs", "true")
+				runGit(t, root, "checkout", "-q", "-b", "sidebranch")
+				runGit(t, root, "checkout", "-q", "-")
+
+				info, err := os.Lstat(filepath.Join(root, ".git", "HEAD"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if info.Mode()&os.ModeSymlink == 0 {
+					t.Skip("this git does not honour core.preferSymlinkRefs")
+				}
+				return root
+			},
+		},
+		{
+			// `git -c <key>=<value> <alias>` exports GIT_CONFIG_PARAMETERS, not
+			// GIT_CONFIG_COUNT, and gopen's documented invocation is a git
+			// alias. No file scan can see this, so it has to disqualify the
+			// fast path outright.
+			name:       "GIT_CONFIG_PARAMETERS carries an insteadOf",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				// The exact quoting git itself exports, verified against 2.54.
+				t.Setenv("GIT_CONFIG_PARAMETERS",
+					`'url.https://gitlab.com/mirror/.insteadOf'='https://github.com/example/'`)
+				return root
+			},
+		},
 
 		// --- include and includeIf ---
 		//
@@ -1834,6 +2059,63 @@ func TestDifferential_ErrorCases(t *testing.T) {
 			remote: "origin",
 			build:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
 		},
+		{
+			// Deliberate choice, not an oversight. `git init` + `git remote add`
+			// with no commit leaves HEAD pointing at a branch that does not
+			// exist: `git branch --show-current` prints it, but
+			// `git rev-parse --abbrev-ref HEAD` exits 128 and rev-parse is what
+			// the subprocess path runs. The fast path used to answer "main"
+			// here, which was both a silent divergence and a URL no forge would
+			// serve, so it now refuses too — the behaviour gopen had before the
+			// fast path existed.
+			name:   "unborn branch, before the first commit",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				dir := t.TempDir()
+				runGit(t, dir, "init")
+				runGit(t, dir, "remote", "add", "origin", "https://github.com/example/repo.git")
+				return dir
+			},
+		},
+		{
+			// git's iskeychar() rejects '_', so this aborts *every* git command
+			// in the repository with "fatal: bad config line". The fast path has
+			// to refuse the whole file rather than skip the line it cannot read
+			// and hand back a URL git never got far enough to report.
+			name:   "config key git's parser rejects",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				appendFile(t, filepath.Join(root, ".git", "config"), "[foo]\n\tbad_key = 1\n")
+				return root
+			},
+		},
+		{
+			// A bare `url` line: git records a NULL value and dies with
+			// "missing value for 'remote.x.url'" on any remote lookup, origin's
+			// included. Answering with origin's perfectly good URL would still
+			// be a divergence — git refuses to run at all.
+			name:   "valueless remote url key elsewhere in the config",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				appendFile(t, filepath.Join(root, ".git", "config"), "[remote \"x\"]\n\turl\n")
+				return root
+			},
+		},
+		{
+			// The same, on the remote actually being asked for.
+			name:   "valueless url on the remote under lookup",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				appendFile(t, filepath.Join(root, ".git", "config"),
+					"[remote \"origin\"]\n\turl\n\turl = https://github.com/example/repo.git\n")
+				return root
+			},
+		},
 	}
 
 	for _, c := range cases {
@@ -1846,6 +2128,20 @@ func TestDifferential_ErrorCases(t *testing.T) {
 				t.Errorf("disagreement:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
 			}
 		})
+	}
+}
+
+// appendFile appends to an existing file, for fixtures that graft extra config
+// onto a repository git already created.
+func appendFile(t *testing.T, path, content string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatal(err)
 	}
 }
 
