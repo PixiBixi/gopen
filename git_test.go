@@ -144,7 +144,14 @@ func tryGit(dir string, args ...string) error {
 
 func newTmpGitRepo(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
+	return newTmpGitRepoIn(t, t.TempDir())
+}
+
+// newTmpGitRepoIn is newTmpGitRepo at a caller-chosen location, for fixtures
+// that need the repository to sit under a particular directory — an includeIf
+// gitdir: pattern rooted at ~, for instance.
+func newTmpGitRepoIn(t *testing.T, dir string) string {
+	t.Helper()
 	for _, args := range [][]string{
 		{"init"},
 		{"config", "user.email", "test@test.com"},

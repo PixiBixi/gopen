@@ -1497,6 +1497,12 @@ func TestGetRepoContext_FallsBackToGit(t *testing.T) {
 
 // --- the differential test ---
 
+// rewriteToMirror is the config body the includeIf fixtures pull in: if git
+// reads it, the remote resolves to https://gitlab.com/mirror/repo instead of
+// https://github.com/example/repo, so a wrong verdict on the condition shows up
+// as a URL divergence rather than a silent pass.
+const rewriteToMirror = "[url \"https://gitlab.com/mirror/\"]\n\tinsteadOf = https://github.com/example/\n"
+
 // TestDifferential_FastPathMatchesGit is the core guarantee of this design:
 // for every repository shape gopen supports, reading .git directly must yield
 // exactly what shelling out to git yields. A divergence here is a bug that
@@ -1940,6 +1946,108 @@ func TestDifferential_FastPathMatchesGit(t *testing.T) {
 				})
 			},
 		},
+		// The gitdir: conditions below pin gitDirMayMatch on real patterns
+		// rather than the degenerate "/" above, which only ever exercised the
+		// leading-slash test. Each pairs the same insteadOf with a different
+		// shape of pattern, so a wrong verdict shows up as a URL divergence.
+		{
+			name:       "includeIf gitdir naming the git directory exactly",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					return "[includeIf \"gitdir:" + gitDir + "\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// A trailing separator turns the pattern into a "**" prefix match,
+			// so the parent directory covers the git dir beneath it.
+			name:       "includeIf gitdir with a trailing separator matches a parent",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					return "[includeIf \"gitdir:" + filepath.Dir(filepath.Dir(gitDir)) + "/\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// Without the trailing separator the same parent is an exact-match
+			// pattern, which the git directory cannot equal.
+			name:   "includeIf gitdir naming a parent without a trailing separator",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					return "[includeIf \"gitdir:" + filepath.Dir(gitDir) + "\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// A sibling under the same parent: the prefix test must not fire.
+			name:   "includeIf gitdir naming a sibling directory",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					sibling := filepath.Join(filepath.Dir(filepath.Dir(gitDir)), "sibling")
+					mkdirAll(t, sibling)
+					return "[includeIf \"gitdir:" + sibling + "/\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// git's realpath of the pattern fails, leaving the condition false.
+			name:   "includeIf gitdir naming a path that does not exist",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					return "[includeIf \"gitdir:" + filepath.Join(gitDir, "no", "such", "dir") + "/\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// A wildcard is outside the subset gitDirMayMatch reproduces, so it
+			// answers "maybe" and the file is judged on its contents — which
+			// here really do rewrite the URL, and git agrees.
+			name:       "includeIf gitdir with a wildcard that matches",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfigFor(t, func(home, gitDir string) string {
+					writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+					return "[includeIf \"gitdir:" + filepath.Dir(gitDir) + "/**\"]\n\tpath = ~/work\n"
+				})
+			},
+		},
+		{
+			// The pattern is written against ~ and must be spliced with the
+			// symlink-resolved home, which is what git compares.
+			name:       "includeIf gitdir rooted at ~",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				home := t.TempDir()
+				root := newTmpGitRepoIn(t, mkdirAll(t, filepath.Join(home, "src")))
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				writeFile(t, filepath.Join(home, "work"), rewriteToMirror)
+
+				global := filepath.Join(home, ".gitconfig")
+				writeFile(t, global, "[includeIf \"gitdir:~/src/\"]\n\tpath = ~/work\n")
+				t.Setenv("HOME", home)
+				t.Setenv("USERPROFILE", home)
+				t.Setenv("GIT_CONFIG_GLOBAL", global)
+				return root
+			},
+		},
 		{
 			// A condition git never evaluates to true, on a file that would
 			// have changed the answer had it been read.
@@ -1994,11 +2102,13 @@ func TestDifferential_FastPathMatchesGit(t *testing.T) {
 				return
 			}
 
-			if (fastErr == nil) != (slowErr == nil) {
-				t.Fatalf("error disagreement:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
-			}
-			if fastErr != nil {
-				return // both failed, which is consistent
+			// Both paths must *answer*, not merely agree. Accepting a double
+			// failure here would let any fixture whose build silently failed to
+			// construct the intended shape pass without exercising anything.
+			// A shape that is meant to fail belongs in fallsBack or in
+			// TestDifferential_ErrorCases.
+			if fastErr != nil || slowErr != nil {
+				t.Fatalf("both paths must resolve this shape:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
 			}
 			if fast != slow {
 				t.Errorf("fast path diverges from git:\n  fast: %+v\n  git:  %+v", fast, slow)
@@ -2016,12 +2126,22 @@ func TestDifferential_FastPathMatchesGit(t *testing.T) {
 // instead of the lookup under test.
 func repoWithGlobalConfig(t *testing.T, makeConfig func(home string) string) string {
 	t.Helper()
+	return repoWithGlobalConfigFor(t, func(home, _ string) string { return makeConfig(home) })
+}
+
+// repoWithGlobalConfigFor is repoWithGlobalConfig for configs that have to name
+// the repository, such as an includeIf gitdir: condition. makeConfig also
+// receives the repository's git directory, symlink-resolved because that is the
+// text git matches a gitdir: pattern against.
+func repoWithGlobalConfigFor(t *testing.T, makeConfig func(home, gitDir string) string) string {
+	t.Helper()
 	root := newTmpGitRepo(t)
 	runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+	gitDir := realPath(t, filepath.Join(root, ".git"))
 
 	home := t.TempDir()
 	global := filepath.Join(home, ".gitconfig")
-	writeFile(t, global, makeConfig(home))
+	writeFile(t, global, makeConfig(home, gitDir))
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
@@ -2124,8 +2244,8 @@ func TestDifferential_ErrorCases(t *testing.T) {
 			target := c.build(t)
 			_, fastErr := readRepoContextFromDisk(target, c.remote)
 			_, slowErr := repoContextViaGit(target, c.remote)
-			if (fastErr == nil) != (slowErr == nil) {
-				t.Errorf("disagreement:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
+			if fastErr == nil || slowErr == nil {
+				t.Errorf("both paths must refuse this shape:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
 			}
 		})
 	}
