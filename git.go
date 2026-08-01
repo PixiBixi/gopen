@@ -56,15 +56,28 @@ func resolvePath(paths []string) (string, error) {
 }
 
 // getRepoContext collects all git information needed to build the web URL.
+//
+// It prefers reading .git directly, which avoids four subprocess forks, and
+// defers to the git binary whenever the fast path cannot be certain of the
+// result. Correctness always wins over speed: the fast path must never return
+// a value that differs from what git would have produced, so every state it
+// does not fully understand is an error here, not a guess.
 func getRepoContext(targetPath, remoteName string) (repoContext, error) {
-	info, err := os.Stat(targetPath)
-	if err != nil {
-		return repoContext{}, fmt.Errorf("failed to stat path: %w", err)
+	if ctx, err := readRepoContextFromDisk(targetPath, remoteName); err == nil {
+		return ctx, nil
 	}
+	return repoContextViaGit(targetPath, remoteName)
+}
 
-	dir := targetPath
-	if !info.IsDir() {
-		dir = filepath.Dir(targetPath)
+// repoContextViaGit is the subprocess fallback: four git invocations.
+func repoContextViaGit(targetPath, remoteName string) (repoContext, error) {
+	// Same resolution the fast path applies, from the same helper so the two
+	// cannot drift: git reports a symlink-resolved root, so the target has to
+	// be expressed in the resolved namespace too or relPath fills with "..".
+	// On macOS /var is a symlink to /private/var, which makes this routine.
+	dir, resolvedTarget, err := resolveTarget(targetPath)
+	if err != nil {
+		return repoContext{}, err
 	}
 
 	if !isGitRepo(dir) {
@@ -86,12 +99,9 @@ func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 		return repoContext{}, err
 	}
 
-	relPath, err := filepath.Rel(repoRoot, targetPath)
+	relPath, err := relativeToRoot(repoRoot, resolvedTarget)
 	if err != nil {
-		return repoContext{}, fmt.Errorf("failed to compute relative path: %w", err)
-	}
-	if relPath == "." {
-		relPath = ""
+		return repoContext{}, err
 	}
 
 	return repoContext{

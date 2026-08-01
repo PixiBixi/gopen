@@ -203,3 +203,67 @@ func TestParseArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestParseArgs_Print(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    config
+		wantErr bool
+	}{
+		{
+			name: "long form",
+			args: []string{"--print"},
+			want: config{remoteName: "origin", print: true},
+		},
+		{
+			name: "short form",
+			args: []string{"-p"},
+			want: config{remoteName: "origin", print: true},
+		},
+		{
+			name: "with a path",
+			args: []string{"-p", "main.go"},
+			want: config{remoteName: "origin", print: true, paths: []string{"main.go"}},
+		},
+		{
+			name: "combined with copy: both flags set, precedence resolved in main",
+			args: []string{"-p", "-c"},
+			want: config{remoteName: "origin", print: true, copy: true},
+		},
+		{
+			name:    "-p is not confused with a -p-prefixed unknown flag",
+			args:    []string{"-pretty"},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an unknown-flag error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgs(%v) error = %v", tt.args, err)
+			}
+			if got.print != tt.want.print {
+				t.Errorf("print = %v, want %v", got.print, tt.want.print)
+			}
+			if got.copy != tt.want.copy {
+				t.Errorf("copy = %v, want %v", got.copy, tt.want.copy)
+			}
+			if len(got.paths) != len(tt.want.paths) {
+				t.Fatalf("paths = %v, want %v", got.paths, tt.want.paths)
+			}
+			for i := range got.paths {
+				if got.paths[i] != tt.want.paths[i] {
+					t.Errorf("paths[%d] = %q, want %q", i, got.paths[i], tt.want.paths[i])
+				}
+			}
+		})
+	}
+}

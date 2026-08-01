@@ -33,6 +33,9 @@ linters:
         - G104 # unhandled errors: fully overlaps errcheck, which is tuned above
         - G204 # subprocess with variable: gopen's purpose is to exec git/open;
         #        no shell is involved (args are passed as separate argv)
+        - G304 # file read with variable path: gopen's purpose is to read files
+        #        inside the caller's own .git directory, not attacker-controlled
+        #        input from a network boundary
     revive:
       rules:
         # Style-only rules, not worth the churn on a small single-binary CLI.

@@ -47,13 +47,18 @@ func main() {
 
 	webURL := buildWebURL(ctx, cfg.line, cfg.commit)
 
-	if cfg.copy {
+	// -p wins over -c: printing is the scriptable, side-effect-free mode, so
+	// the more conservative one takes precedence when both are given.
+	switch {
+	case cfg.print:
+		fmt.Println(webURL)
+	case cfg.copy:
 		if err := copyToClipboard(webURL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error copying to clipboard: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Printf("URL copied to clipboard: %s\n", webURL)
-	} else {
+	default:
 		fmt.Printf("Opening: %s\n", webURL)
 		if err := openBrowser(webURL); err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening browser: %v\n", err)

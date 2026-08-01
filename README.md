@@ -15,6 +15,7 @@ Open your git repository in the browser at the current branch and directory. Sim
 - 🔢 **Line numbers**: Jump to specific line or line range in files
 - 🔀 **Multiple remotes**: Choose which remote to open (origin, upstream, fork, etc.)
 - 📋 **Clipboard mode**: Copy URL instead of opening browser
+- 🖨️ **Print mode**: Print the URL to stdout for scripting, no browser or clipboard (takes precedence over `--copy`)
 - 🔖 **Commit links**: Open a specific commit page or file at a given commit
 - 🐚 **Shell completion**: Built-in completion for bash, zsh, and fish
 - 🔄 Converts git:// and ssh:// URLs to HTTPS automatically
@@ -87,6 +88,13 @@ gopen --remote fork
 gopen -c
 gopen --copy
 
+# Print URL to stdout instead of opening (scripting)
+gopen -p
+gopen --print main.go
+
+# -p wins over -c: this prints the URL, it does not touch the clipboard
+gopen -p -c main.go
+
 # Open file at specific line (all syntaxes work)
 gopen -l 42 main.go
 gopen main.go -l42
@@ -141,6 +149,15 @@ gopen -r upstream
 ```bash
 gopen -c src/main.go
 # → Output: URL copied to clipboard: https://github.com/user/repo/tree/main/src/main.go
+```
+
+### Print URL for scripting
+```bash
+gopen -p src/main.go
+# → Output: https://github.com/user/repo/tree/main/src/main.go
+
+# Useful in pipelines, e.g. open in a specific browser:
+open -a "Google Chrome" "$(gopen -p)"
 ```
 
 ### From subdirectory on feature branch
@@ -239,6 +256,12 @@ ssh://git@github.com/user/repo.git        → https://github.com/user/repo
 git://github.com/user/repo.git            → https://github.com/user/repo
 https://github.com/user/repo.git          → https://github.com/user/repo
 ```
+
+## How it works
+
+gopen reads `.git` directly (config, `HEAD`, worktree layout) instead of shelling out to `git`, which makes most runs faster. It falls back to invoking the `git` binary whenever it cannot be certain — a config include or `insteadOf` rewrite it would have to resolve, a worktree config, custom ref storage, a symlinked `HEAD`, and similar. The fast path is designed to refuse rather than guess: erring towards a fallback costs a few milliseconds, whereas answering differently from `git` would send you to the wrong page.
+
+Two known gaps are documented in the source and fall outside that guarantee: the system-wide config path is compiled into the `git` binary and can only be guessed (the standard locations and the one implied by `git` on `PATH` are covered), and the discovery walk does not stop at a filesystem boundary the way `git` does without `GIT_DISCOVERY_ACROSS_FILESYSTEM`.
 
 ## Requirements
 

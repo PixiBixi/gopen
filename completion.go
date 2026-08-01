@@ -43,7 +43,7 @@ _gopen() {
     esac
 
     if [[ "${cur}" == -* ]]; then
-        COMPREPLY=($(compgen -W "-v --version -c --copy -r --remote -l --line --commit --completion" -- "${cur}"))
+        COMPREPLY=($(compgen -W "-v --version -c --copy -p --print -r --remote -l --line --commit --completion" -- "${cur}"))
     else
         COMPREPLY=($(compgen -f -- "${cur}"))
     fi
@@ -60,6 +60,7 @@ _gopen() {
     _arguments \
         '(-v --version)'{-v,--version}'[Print version information]' \
         '(-c --copy)'{-c,--copy}'[Copy URL to clipboard instead of opening browser]' \
+        '(-p --print)'{-p,--print}'[Print the URL to stdout and exit]' \
         '(-r --remote)'{-r,--remote}'[Git remote to use (default: origin)]:remote name:' \
         '(-l --line)'{-l,--line}'[Highlight line or range (e.g. 42 or 42-50)]:line:' \
         '--commit[Open a specific commit]:hash:' \
@@ -76,6 +77,7 @@ const fishCompletion = `# gopen fish completion
 
 complete -c gopen -s v -l version -d 'Print version information' -f
 complete -c gopen -s c -l copy -d 'Copy URL to clipboard instead of opening browser' -f
+complete -c gopen -s p -l print -d 'Print the URL to stdout and exit' -f
 complete -c gopen -s r -l remote -d 'Git remote to use (default: origin)' -r
 complete -c gopen -s l -l line -d 'Highlight line or range (e.g. 42 or 42-50)' -r
 complete -c gopen -l commit -d 'Open a specific commit' -r -f
