@@ -315,3 +315,388 @@ func TestBranchFromHEAD(t *testing.T) {
 		}
 	})
 }
+
+// --- discoverGitDir ---
+
+func assertFileExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("expected %s to exist: %v", path, err)
+	}
+}
+
+func mkdirAll(t *testing.T, path string) string {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// assertMatchesGit is the real assertion of this file: whatever discoverGitDir
+// answers must name the same repository the git binary names. Paths are
+// compared symlink-resolved because git reports real paths while the fast path
+// deliberately stays in the caller's namespace.
+func assertMatchesGit(t *testing.T, start string) {
+	t.Helper()
+	gitDir, commonDir, workTree, err := discoverGitDir(start)
+	if err != nil {
+		t.Fatalf("discoverGitDir(%q) error = %v", start, err)
+	}
+
+	// --git-common-dir may come back relative to the process cwd, which is
+	// `start` for gitOut.
+	wantCommon := gitOut(t, start, "rev-parse", "--git-common-dir")
+	if !filepath.IsAbs(wantCommon) {
+		wantCommon = filepath.Join(start, wantCommon)
+	}
+
+	for _, c := range []struct{ name, got, want string }{
+		{"gitDir", gitDir, gitOut(t, start, "rev-parse", "--absolute-git-dir")},
+		{"commonDir", commonDir, wantCommon},
+		{"workTree", workTree, gitOut(t, start, "rev-parse", "--show-toplevel")},
+	} {
+		if realPath(t, c.got) != realPath(t, c.want) {
+			t.Errorf("%s = %q, git says %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+func TestDiscoverGitDir(t *testing.T) {
+	t.Run("plain repo from its root", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		gitDir, commonDir, workTree, err := discoverGitDir(root)
+		if err != nil {
+			t.Fatalf("discoverGitDir() error = %v", err)
+		}
+		wantGit := filepath.Join(root, ".git")
+		if gitDir != wantGit {
+			t.Errorf("gitDir = %q, want %q", gitDir, wantGit)
+		}
+		if commonDir != wantGit {
+			t.Errorf("commonDir = %q, want %q", commonDir, wantGit)
+		}
+		if workTree != root {
+			t.Errorf("workTree = %q, want %q", workTree, root)
+		}
+		assertMatchesGit(t, root)
+	})
+
+	t.Run("walks up from a nested subdirectory", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		nested := mkdirAll(t, filepath.Join(root, "a", "b", "c"))
+		_, _, workTree, err := discoverGitDir(nested)
+		if err != nil {
+			t.Fatalf("discoverGitDir() error = %v", err)
+		}
+		if workTree != root {
+			t.Errorf("workTree = %q, want %q", workTree, root)
+		}
+		assertMatchesGit(t, nested)
+	})
+
+	t.Run("linked worktree splits gitDir from commonDir", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		wt := filepath.Join(t.TempDir(), "wt")
+		runGit(t, root, "worktree", "add", "-b", "wt-branch", wt)
+
+		gitDir, commonDir, workTree, err := discoverGitDir(wt)
+		if err != nil {
+			t.Fatalf("discoverGitDir() error = %v", err)
+		}
+		if workTree != wt {
+			t.Errorf("workTree = %q, want %q", workTree, wt)
+		}
+		if gitDir == commonDir {
+			t.Errorf("gitDir and commonDir must differ in a linked worktree, both = %q", gitDir)
+		}
+		// HEAD lives in the worktree gitdir, config in the common dir.
+		assertFileExists(t, filepath.Join(gitDir, "HEAD"))
+		assertFileExists(t, filepath.Join(commonDir, "config"))
+		assertMatchesGit(t, wt)
+		assertMatchesGit(t, mkdirAll(t, filepath.Join(wt, "x", "y")))
+	})
+
+	t.Run("submodule resolves its relative gitdir pointer", func(t *testing.T) {
+		_, sub := newTmpSubmodule(t)
+		gitDir, commonDir, workTree, err := discoverGitDir(sub)
+		if err != nil {
+			t.Fatalf("discoverGitDir() error = %v", err)
+		}
+		// A submodule gitdir is a full repository, not a worktree of one.
+		if gitDir != commonDir {
+			t.Errorf("gitDir = %q, commonDir = %q, want them equal", gitDir, commonDir)
+		}
+		if workTree != sub {
+			t.Errorf("workTree = %q, want %q", workTree, sub)
+		}
+		assertMatchesGit(t, sub)
+		assertMatchesGit(t, mkdirAll(t, filepath.Join(sub, "deep", "er")))
+	})
+
+	t.Run("worktree of a submodule", func(t *testing.T) {
+		_, sub := newTmpSubmodule(t)
+		wt := filepath.Join(t.TempDir(), "subwt")
+		runGit(t, sub, "worktree", "add", "-b", "sub-wt", wt)
+		assertMatchesGit(t, wt)
+	})
+
+	t.Run("linked worktree ignores core.bare and core.worktree", func(t *testing.T) {
+		// git honours those two keys in the main worktree only, so a linked
+		// worktree of a repo that sets them must still resolve normally.
+		root := newTmpGitRepo(t)
+		wt := filepath.Join(t.TempDir(), "wt")
+		runGit(t, root, "worktree", "add", "-b", "ignored", wt)
+		runGit(t, root, "config", "core.worktree", t.TempDir())
+		runGit(t, root, "config", "core.bare", "true")
+		assertMatchesGit(t, wt)
+	})
+
+	t.Run("outside any repo returns an error", func(t *testing.T) {
+		if _, _, _, err := discoverGitDir(t.TempDir()); err == nil {
+			t.Error("expected an error outside a repository")
+		}
+	})
+
+	t.Run("start may be a file inside the repo", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		file := filepath.Join(root, "main.go")
+		writeFile(t, file, "package main\n")
+		_, _, workTree, err := discoverGitDir(file)
+		if err != nil {
+			t.Fatalf("discoverGitDir() error = %v", err)
+		}
+		if workTree != root {
+			t.Errorf("workTree = %q, want %q", workTree, root)
+		}
+	})
+}
+
+// TestDiscoverGitDir_RefusesWhatItCannotReproduce covers the states where a
+// plausible-looking answer would differ from git's. Each case asserts what the
+// git binary really does first, so the expectations cannot drift.
+func TestDiscoverGitDir_RefusesWhatItCannotReproduce(t *testing.T) {
+	t.Run("stray .git directory inside a repo", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		stray := mkdirAll(t, filepath.Join(root, "vendor", "thing"))
+		mkdirAll(t, filepath.Join(stray, ".git"))
+
+		// git ignores the unusable .git and keeps walking up to the real repo.
+		if got, want := realPath(t, gitOut(t, stray, "rev-parse", "--show-toplevel")), realPath(t, root); got != want {
+			t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+		}
+		// Returning the stray directory would silently name another repo, and
+		// skipping it would risk skipping a repo git accepts, so: error.
+		if _, _, _, err := discoverGitDir(stray); err == nil {
+			t.Error("expected an error for an unusable .git directory")
+		}
+	})
+
+	t.Run("bogus HEAD in an otherwise complete .git directory", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		stray := mkdirAll(t, filepath.Join(root, "broken"))
+		mkdirAll(t, filepath.Join(stray, ".git", "objects"))
+		mkdirAll(t, filepath.Join(stray, ".git", "refs"))
+		writeFile(t, filepath.Join(stray, ".git", "HEAD"), "garbage\n")
+
+		if got, want := realPath(t, gitOut(t, stray, "rev-parse", "--show-toplevel")), realPath(t, root); got != want {
+			t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+		}
+		if _, _, _, err := discoverGitDir(stray); err == nil {
+			t.Error("expected an error for a .git directory with an invalid HEAD")
+		}
+	})
+
+	t.Run("reftable repository", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := tryGit(dir, "init", "--ref-format=reftable", "."); err != nil {
+			t.Skipf("git does not support --ref-format=reftable: %v", err)
+		}
+		// The trap: .git/HEAD reads "ref: refs/heads/.invalid" while the real
+		// branch lives in .git/reftable. Reading HEAD would look plausible and
+		// be wrong, so the whole repository has to be refused.
+		head, err := os.ReadFile(filepath.Join(dir, ".git", "HEAD"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(head), ".invalid") {
+			t.Fatalf("precondition: unexpected reftable HEAD %q", head)
+		}
+		if _, _, _, err := discoverGitDir(dir); err == nil {
+			t.Error("expected an error for a reftable-backed repository")
+		}
+	})
+
+	t.Run("core.worktree pointing somewhere else", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		elsewhere := t.TempDir()
+		runGit(t, root, "config", "core.worktree", elsewhere)
+
+		// git relocates the work tree; the directory holding .git is no longer
+		// the toplevel, so the walk's answer would be wrong.
+		if got, want := realPath(t, gitOut(t, root, "rev-parse", "--show-toplevel")), realPath(t, elsewhere); got != want {
+			t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+		}
+		if _, _, _, err := discoverGitDir(root); err == nil {
+			t.Error("expected an error when core.worktree relocates the work tree")
+		}
+	})
+
+	t.Run("core.bare true", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		runGit(t, root, "config", "core.bare", "true")
+		if _, _, _, err := discoverGitDir(root); err == nil {
+			t.Error("expected an error for a repository configured bare")
+		}
+	})
+
+	t.Run("unknown repository extension", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		runGit(t, root, "config", "core.repositoryformatversion", "1")
+		runGit(t, root, "config", "extensions.thingWeDoNotKnow", "true")
+		if _, _, _, err := discoverGitDir(root); err == nil {
+			t.Error("expected an error for an unknown repository extension")
+		}
+	})
+
+	t.Run("worktree config extension", func(t *testing.T) {
+		root := newTmpGitRepo(t)
+		runGit(t, root, "config", "core.repositoryformatversion", "1")
+		runGit(t, root, "config", "extensions.worktreeConfig", "true")
+		if _, _, _, err := discoverGitDir(root); err == nil {
+			t.Error("expected an error when per-worktree config may override core.*")
+		}
+	})
+
+	t.Run("environment overrides", func(t *testing.T) {
+		for _, name := range []string{"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"} {
+			t.Run(name, func(t *testing.T) {
+				root := newTmpGitRepo(t)
+				t.Setenv(name, root)
+				if _, _, _, err := discoverGitDir(root); err == nil {
+					t.Errorf("expected an error when %s is set", name)
+				}
+			})
+		}
+	})
+}
+
+// TestDiscoverGitDir_GitfilePointer pins the ".git file" format against what
+// git's own read_gitfile_gently() accepts: exactly "gitdir: " then the path,
+// with only trailing newlines stripped.
+func TestDiscoverGitDir_GitfilePointer(t *testing.T) {
+	// A real, valid git directory for the pointers to aim at.
+	target := filepath.Join(newTmpGitRepo(t), ".git")
+
+	tests := []struct {
+		name    string
+		content string
+		wantErr bool
+	}{
+		{name: "relative pointer", content: "gitdir: ../real/.git\n"},
+		{name: "absolute pointer", content: "gitdir: " + target + "\n"},
+		{name: "no trailing newline", content: "gitdir: ../real/.git"},
+		{name: "carriage return", content: "gitdir: ../real/.git\r\n"},
+		{name: "missing gitdir prefix", content: "hello world\n", wantErr: true},
+		{name: "no space after the colon", content: "gitdir:../real/.git\n", wantErr: true},
+		{name: "padded path", content: "gitdir:   ../real/.git\n", wantErr: true},
+		{name: "trailing space", content: "gitdir: ../real/.git \n", wantErr: true},
+		{name: "extra line", content: "gitdir: ../real/.git\nextra\n", wantErr: true},
+		{name: "leading blank line", content: "\ngitdir: ../real/.git\n", wantErr: true},
+		{name: "empty file", content: "", wantErr: true},
+		{name: "only the prefix", content: "gitdir: \n", wantErr: true},
+		{name: "points at a non-repository", content: "gitdir: ../empty\n", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Each case gets its own tree: <tmp>/real is a repository the
+			// relative pointers can reach, <tmp>/empty is not.
+			base := t.TempDir()
+			runGit(t, mkdirAll(t, filepath.Join(base, "real")), "init", ".")
+			mkdirAll(t, filepath.Join(base, "empty"))
+			work := mkdirAll(t, filepath.Join(base, "work"))
+			writeFile(t, filepath.Join(work, ".git"), tt.content)
+
+			// Assert git's own verdict first so the table cannot drift.
+			gitErr := tryGit(work, "rev-parse", "--absolute-git-dir")
+			if (gitErr != nil) != tt.wantErr {
+				t.Fatalf("precondition: git error = %v, wantErr = %v", gitErr, tt.wantErr)
+			}
+
+			_, _, workTree, err := discoverGitDir(work)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("discoverGitDir() = %q, want an error (git refuses this file)", workTree)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("discoverGitDir() error = %v", err)
+			}
+			if workTree != work {
+				t.Errorf("workTree = %q, want %q", workTree, work)
+			}
+		})
+	}
+}
+
+func TestLastConfigValue(t *testing.T) {
+	entries := []configEntry{
+		{"core.bare", "false"},
+		{"remote.origin.url", "a"},
+		{"core.bare", "true"},
+	}
+	tests := []struct {
+		name      string
+		key       string
+		want      string
+		wantFound bool
+	}{
+		{name: "repeated key returns the last value", key: "core.bare", want: "true", wantFound: true},
+		{name: "single occurrence", key: "remote.origin.url", want: "a", wantFound: true},
+		{name: "missing key", key: "core.worktree"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, found := lastConfigValue(entries, tt.key)
+			if got != tt.want || found != tt.wantFound {
+				t.Errorf("lastConfigValue(%q) = (%q, %v), want (%q, %v)", tt.key, got, found, tt.want, tt.wantFound)
+			}
+		})
+	}
+}
+
+func TestConfigBool(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		want     bool
+		wantKnow bool
+	}{
+		{name: "true", input: "true", want: true, wantKnow: true},
+		{name: "uppercase yes", input: "YES", want: true, wantKnow: true},
+		{name: "on", input: "on", want: true, wantKnow: true},
+		{name: "one", input: "1", want: true, wantKnow: true},
+		{name: "false", input: "false", wantKnow: true},
+		{name: "off", input: "off", wantKnow: true},
+		{name: "zero", input: "0", wantKnow: true},
+		{name: "empty is false", input: "", wantKnow: true},
+		{name: "anything else is not understood", input: "maybe"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, know := configBool(tt.input)
+			if got != tt.want || know != tt.wantKnow {
+				t.Errorf("configBool(%q) = (%v, %v), want (%v, %v)", tt.input, got, know, tt.want, tt.wantKnow)
+			}
+		})
+	}
+}

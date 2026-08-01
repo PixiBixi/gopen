@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,6 +109,39 @@ func TestResolvePath(t *testing.T) {
 // --- git integration helpers ---
 // These tests run against a real temporary git repository.
 
+// runGit runs a git command in dir and fails the test if it errors.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+// gitOut runs a git command in dir and returns its trimmed stdout. It is what
+// the pure-Go readers are cross-checked against: the only definition of a
+// correct answer is the one the git binary gives.
+func gitOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v failed: %v", args, err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// tryGit runs a git command in dir and returns its error instead of failing
+// the test. Used to pin a test expectation on what the git binary really does
+// before asserting that the pure-Go reader agrees.
+func tryGit(dir string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	return cmd.Run()
+}
+
 func newTmpGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -117,13 +151,22 @@ func newTmpGitRepo(t *testing.T) string {
 		{"config", "user.name", "Test"},
 		{"commit", "--allow-empty", "-m", "init"},
 	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
+		runGit(t, dir, args...)
 	}
 	return dir
+}
+
+// newTmpSubmodule builds a superproject with a submodule checked out at
+// <super>/sub. It is the fixture for the two things that make submodules
+// special on disk: a .git *file* holding a relative gitdir pointer, and a
+// module config carrying core.worktree.
+func newTmpSubmodule(t *testing.T) (super, sub string) {
+	t.Helper()
+	src := newTmpGitRepo(t)
+	super = newTmpGitRepo(t)
+	runGit(t, super, "-c", "protocol.file.allow=always", "submodule", "add", "-q", src, "sub")
+	runGit(t, super, "commit", "-q", "-m", "add submodule")
+	return super, filepath.Join(super, "sub")
 }
 
 func TestIsGitRepo(t *testing.T) {

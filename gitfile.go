@@ -281,3 +281,327 @@ func isHexSHA(s string) bool {
 	}
 	return true
 }
+
+// gitDiscoveryEnvVars are the environment variables that make git skip or bound
+// the .git walk entirely. Reproducing each of them is more surface than the
+// fast path is worth, so their mere presence disqualifies it: the caller falls
+// back to the git binary, which applies them correctly.
+//
+// GIT_PREFIX is deliberately absent — git sets it for `!alias` commands (which
+// is how gopen is usually invoked) and it does not affect discovery.
+var gitDiscoveryEnvVars = []string{
+	"GIT_DIR",
+	"GIT_COMMON_DIR",
+	"GIT_WORK_TREE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_CEILING_DIRECTORIES",
+}
+
+// safeRepoExtensions lists the extensions.* keys that cannot change how the
+// branch, the remote URL or the work tree are resolved. Anything else — most
+// importantly extensions.refstorage=reftable, where .git/HEAD is the decoy
+// "ref: refs/heads/.invalid", and extensions.worktreeConfig, where a
+// per-worktree config file can override core.* — has to be refused.
+var safeRepoExtensions = map[string]bool{
+	"objectformat":       true, // sha1 or sha256; both are plain hex in HEAD
+	"compatobjectformat": true,
+	"preciousobjects":    true,
+	"partialclone":       true,
+	"relativeworktrees":  true,
+	"noop":               true,
+	"noop-v1":            true,
+}
+
+// discoverGitDir walks up from start until it finds a .git entry, and returns
+// paths only if it is certain they name the same repository `git rev-parse`
+// would name.
+//
+// A .git directory is the normal case. A .git file holds "gitdir: <path>" and
+// appears in linked worktrees and submodules; there, HEAD lives in gitDir while
+// config lives in the shared commonDir, so the two are returned separately.
+//
+// workTree is the directory holding the .git entry. Symlinks are deliberately
+// left unresolved so that workTree and the caller's target path stay in the
+// same namespace; `git rev-parse --show-toplevel` reports the real path, so the
+// two can differ textually while naming the same directory.
+//
+// Known and accepted gap: git stops the walk at a filesystem boundary unless
+// GIT_DISCOVERY_ACROSS_FILESYSTEM is set, and this walk does not, because
+// st_dev is not portable through the standard library. It only matters when a
+// mount point sits between the target and the repository root.
+func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error) {
+	for _, name := range gitDiscoveryEnvVars {
+		if os.Getenv(name) != "" {
+			return "", "", "", fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
+		}
+	}
+
+	dir, err := filepath.Abs(start)
+	if err != nil {
+		return "", "", "", fmt.Errorf("failed to resolve %q: %w", start, err)
+	}
+
+	for {
+		candidate := filepath.Join(dir, ".git")
+		info, statErr := os.Stat(candidate)
+		switch {
+		case statErr != nil:
+			// keep walking up
+		case info.IsDir():
+			return describeRepo(candidate, dir)
+		default:
+			target, readErr := readGitDirFile(candidate)
+			if readErr != nil {
+				// git treats an unreadable .git *file* as fatal rather than
+				// walking past it, so stopping here matches.
+				return "", "", "", readErr
+			}
+			return describeRepo(target, dir)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir { // reached the filesystem root
+			return "", "", "", errors.New("not in a git repository")
+		}
+		dir = parent
+	}
+}
+
+// describeRepo completes and vets a discovery hit.
+//
+// Every check below refuses rather than guesses. That cuts both ways on
+// purpose: git skips a .git directory that fails its own validity test and
+// keeps walking, but silently continuing here would risk naming an outer
+// repository whenever this check is stricter than git's, which is the one
+// unacceptable outcome. An error only costs the caller a fallback to the git
+// binary.
+func describeRepo(gitDir, workTree string) (string, string, string, error) {
+	commonDir, err := resolveCommonDir(gitDir)
+	if err != nil {
+		return "", "", "", err
+	}
+	if err := checkGitDirLayout(gitDir, commonDir); err != nil {
+		return "", "", "", fmt.Errorf("%s is not a usable git directory: %w", gitDir, err)
+	}
+	if err := checkRepoConfig(gitDir, commonDir, workTree); err != nil {
+		return "", "", "", fmt.Errorf("%s: %w", gitDir, err)
+	}
+	return gitDir, commonDir, workTree, nil
+}
+
+const (
+	gitFilePrefix = "gitdir: "
+	// refPrefix is the namespace every ref name lives under; HEAD must point
+	// somewhere inside it for a directory to be a repository at all.
+	refPrefix = "refs/"
+)
+
+// readGitDirFile parses a ".git" file of the form "gitdir: <path>". A relative
+// path is resolved against the directory holding the .git file.
+//
+// The format is matched as strictly as git's read_gitfile_gently(): the prefix
+// includes exactly one space, and only trailing newlines are stripped. Trimming
+// more would accept files git rejects and, worse, turn a padded pointer into a
+// path git never resolves to.
+func readGitDirFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	content := strings.TrimRight(string(raw), "\r\n")
+
+	target, ok := strings.CutPrefix(content, gitFilePrefix)
+	if !ok || target == "" {
+		return "", fmt.Errorf("invalid gitfile format: %s", path)
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return filepath.Clean(target), nil
+}
+
+// resolveCommonDir returns the shared git directory for a linked worktree,
+// whose gitdir holds only HEAD and its own refs while config, objects and refs
+// stay in the common dir. Absent a commondir file, gitDir is already the
+// common dir.
+func resolveCommonDir(gitDir string) (string, error) {
+	path := filepath.Join(gitDir, "commondir")
+	raw, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return gitDir, nil
+	case err != nil:
+		// git dies on an unreadable commondir; guessing gitDir here would
+		// silently point config lookups at the wrong file.
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	common := strings.TrimRight(string(raw), "\r\n")
+	if common == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitDir, common)
+	}
+	return filepath.Clean(common), nil
+}
+
+// checkGitDirLayout mirrors git's is_git_directory(): a valid HEAD in the
+// gitdir, plus objects/ and refs/ in the common dir. Without it, any directory
+// that merely happens to be named .git would be taken for a repository.
+func checkGitDirLayout(gitDir, commonDir string) error {
+	if err := validateHeadRef(filepath.Join(gitDir, "HEAD")); err != nil {
+		return err
+	}
+	for _, name := range []string{"objects", "refs"} {
+		path := filepath.Join(commonDir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("missing %s: %w", name, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s is not a directory", path)
+		}
+	}
+	return nil
+}
+
+// validateHeadRef mirrors git's validate_headref(): HEAD must be a symlink into
+// refs/, a "ref:" pointing into refs/, or a raw object id. It only decides
+// whether the directory is a repository at all — branchFromHEAD is the stricter
+// gate on the value actually returned to the caller.
+func validateHeadRef(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("missing HEAD: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("failed to read the HEAD symlink: %w", err)
+		}
+		if !strings.HasPrefix(target, refPrefix) {
+			return fmt.Errorf("HEAD symlinks to %q, which is not a ref", target)
+		}
+		return nil
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read HEAD: %w", err)
+	}
+	head := string(raw)
+	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
+		if strings.HasPrefix(strings.TrimLeft(ref, " \t\n\v\f\r"), refPrefix) {
+			return nil
+		}
+	}
+	if isHexSHA(strings.TrimSpace(head)) {
+		return nil
+	}
+	return fmt.Errorf("HEAD is neither a ref nor an object id: %q", strings.TrimSpace(head))
+}
+
+// checkRepoConfig refuses the repository shapes where the paths found by the
+// walk would not be the ones git uses: an unknown on-disk format, a bare
+// repository (no work tree at all), or a relocated work tree.
+func checkRepoConfig(gitDir, commonDir, workTree string) error {
+	entries, err := readConfigFile(filepath.Join(commonDir, "config"))
+	if err != nil {
+		return err
+	}
+
+	if version, ok := lastConfigValue(entries, "core.repositoryformatversion"); ok && version != "0" && version != "1" {
+		return fmt.Errorf("unsupported repository format version %q", version)
+	}
+	for _, e := range entries {
+		name, ok := strings.CutPrefix(e.key, "extensions.")
+		if !ok {
+			continue
+		}
+		if name == "refstorage" {
+			if !strings.EqualFold(e.value, "files") {
+				return fmt.Errorf("unsupported ref storage %q", e.value)
+			}
+			continue
+		}
+		if !safeRepoExtensions[name] {
+			return fmt.Errorf("unsupported repository extension %q", name)
+		}
+	}
+
+	// core.bare and core.worktree are honoured only in the main worktree: once
+	// inside a linked worktree git ignores whatever the shared config says
+	// about them (checked against git 2.54, including a worktree of a
+	// submodule, whose shared config always carries core.worktree).
+	if gitDir != commonDir {
+		return nil
+	}
+
+	if value, ok := lastConfigValue(entries, "core.bare"); ok {
+		bare, known := configBool(value)
+		if !known {
+			return fmt.Errorf("unrecognized core.bare value %q", value)
+		}
+		if bare {
+			return errors.New("repository is bare, it has no work tree")
+		}
+	}
+
+	// core.worktree relocates the work tree. Submodules set it to the directory
+	// that holds the .git file, which is exactly what the walk found; anything
+	// else means git would report a different toplevel.
+	value, ok := lastConfigValue(entries, "core.worktree")
+	if !ok {
+		return nil
+	}
+	configured := value
+	if !filepath.IsAbs(configured) {
+		configured = filepath.Join(gitDir, configured)
+	}
+	if filepath.Clean(configured) != workTree {
+		return fmt.Errorf("core.worktree points at %q, not at %q", filepath.Clean(configured), workTree)
+	}
+	return nil
+}
+
+// readConfigFile parses a git config file from disk.
+func readConfigFile(path string) ([]configEntry, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	entries, err := parseGitConfig(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+	return entries, nil
+}
+
+// lastConfigValue returns the last value for key in file order, which is what
+// `git config --get` resolves a repeated key to. It is the counterpart of
+// firstConfigValue, which matches `git remote get-url` instead.
+func lastConfigValue(entries []configEntry, key string) (string, bool) {
+	value, found := "", false
+	for _, e := range entries {
+		if e.key == key {
+			value, found = e.value, true
+		}
+	}
+	return value, found
+}
+
+// configBool interprets a git boolean. The second result reports whether the
+// value was understood at all: git also accepts any non-zero integer, so an
+// unrecognized value must not be assumed false.
+func configBool(value string) (result, known bool) {
+	switch strings.ToLower(value) {
+	case "true", "yes", "on", "1":
+		return true, true
+	case "false", "no", "off", "0", "":
+		return false, true
+	}
+	return false, false
+}
