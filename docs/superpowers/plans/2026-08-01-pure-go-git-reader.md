@@ -94,9 +94,10 @@ Append to `args_test.go`:
 ```go
 func TestParseArgs_Print(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
-		want config
+		name    string
+		args    []string
+		want    config
+		wantErr bool
 	}{
 		{
 			name: "long form",
@@ -119,18 +120,18 @@ func TestParseArgs_Print(t *testing.T) {
 			want: config{remoteName: "origin", print: true, copy: true},
 		},
 		{
-			name: "-p is not confused with a -p-prefixed unknown flag",
-			args: []string{"-pretty"},
-			want: config{},
+			name:    "-p is not confused with a -p-prefixed unknown flag",
+			args:    []string{"-pretty"},
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := parseArgs(tt.args)
-			if tt.name == "-p is not confused with a -p-prefixed unknown flag" {
+			if tt.wantErr {
 				if err == nil {
-					t.Fatal("expected unknown flag error, got nil")
+					t.Fatal("expected an unknown-flag error, got nil")
 				}
 				return
 			}
