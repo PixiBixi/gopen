@@ -56,15 +56,24 @@ func resolvePath(paths []string) (string, error) {
 }
 
 // getRepoContext collects all git information needed to build the web URL.
+//
+// It prefers reading .git directly, which avoids four subprocess forks, and
+// defers to the git binary whenever the fast path cannot be certain of the
+// result. Correctness always wins over speed: the fast path must never return
+// a value that differs from what git would have produced, so every state it
+// does not fully understand is an error here, not a guess.
 func getRepoContext(targetPath, remoteName string) (repoContext, error) {
-	info, err := os.Stat(targetPath)
-	if err != nil {
-		return repoContext{}, fmt.Errorf("failed to stat path: %w", err)
+	if ctx, err := readRepoContextFromDisk(targetPath, remoteName); err == nil {
+		return ctx, nil
 	}
+	return repoContextViaGit(targetPath, remoteName)
+}
 
-	dir := targetPath
-	if !info.IsDir() {
-		dir = filepath.Dir(targetPath)
+// repoContextViaGit is the subprocess fallback: four git invocations.
+func repoContextViaGit(targetPath, remoteName string) (repoContext, error) {
+	dir, err := containingDir(targetPath)
+	if err != nil {
+		return repoContext{}, err
 	}
 
 	if !isGitRepo(dir) {
@@ -86,12 +95,20 @@ func getRepoContext(targetPath, remoteName string) (repoContext, error) {
 		return repoContext{}, err
 	}
 
-	relPath, err := filepath.Rel(repoRoot, targetPath)
-	if err != nil {
-		return repoContext{}, fmt.Errorf("failed to compute relative path: %w", err)
+	// git reports a symlink-resolved root, so resolve the target too or the two
+	// paths end up in different namespaces and relPath fills with "..". On
+	// macOS /var is a symlink to /private/var, which makes this routine.
+	//
+	// The fast path needs no such fix: it derives the work tree by walking up
+	// from the target, so both already live in the caller's namespace.
+	resolvedTarget := targetPath
+	if r, err := filepath.EvalSymlinks(targetPath); err == nil {
+		resolvedTarget = r
 	}
-	if relPath == "." {
-		relPath = ""
+
+	relPath, err := relativeToRoot(repoRoot, resolvedTarget)
+	if err != nil {
+		return repoContext{}, err
 	}
 
 	return repoContext{

@@ -864,13 +864,24 @@ func pinConfigScope(t *testing.T) {
 	writeFile(t, empty, "")
 	t.Setenv("GIT_CONFIG_GLOBAL", empty)
 	t.Setenv("GIT_CONFIG_SYSTEM", empty)
-	t.Setenv("GIT_CONFIG_NOSYSTEM", "")
-	t.Setenv("GIT_CONFIG_COUNT", "")
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir()) // os.UserHomeDir on Windows
+	unsetEnv(t, "GIT_CONFIG_NOSYSTEM")
+	unsetEnv(t, "GIT_CONFIG_COUNT")
 	for _, name := range gitDiscoveryEnvVars {
-		t.Setenv(name, "")
+		unsetEnv(t, name)
+	}
+}
+
+// unsetEnv removes a variable for the duration of the test. t.Setenv cannot do
+// this on its own, and setting it to the empty string is not equivalent: git
+// itself rejects an empty GIT_DIR with "The empty string is not a valid path".
+func unsetEnv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "") // registers the restore of the original value
+	if err := os.Unsetenv(name); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1074,4 +1085,106 @@ func TestSystemConfigPaths_CoversTheRealOne(t *testing.T) {
 		}
 	}
 	t.Errorf("systemConfigPaths() = %v, none of which is git's real system config %q", systemConfigPaths(), want)
+}
+
+// --- readRepoContextFromDisk ---
+
+func TestReadRepoContextFromDisk(t *testing.T) {
+	pinConfigScope(t)
+	root := newTmpGitRepo(t)
+	runGit(t, root, "remote", "add", "origin", "git@github.com:example/repo.git")
+
+	t.Run("repo root yields an empty relPath", func(t *testing.T) {
+		ctx, err := readRepoContextFromDisk(root, "origin")
+		if err != nil {
+			t.Fatalf("readRepoContextFromDisk() error = %v", err)
+		}
+		if ctx.relPath != "" {
+			t.Errorf("relPath = %q, want empty", ctx.relPath)
+		}
+		if ctx.baseURL != "https://github.com/example/repo" {
+			t.Errorf("baseURL = %q, want the HTTPS form", ctx.baseURL)
+		}
+		if ctx.branch == "" {
+			t.Error("branch is empty")
+		}
+	})
+
+	t.Run("nested file yields the right relPath without symlink munging", func(t *testing.T) {
+		nested := mkdirAll(t, filepath.Join(root, "pkg", "util"))
+		file := filepath.Join(nested, "helper.go")
+		writeFile(t, file, "")
+
+		ctx, err := readRepoContextFromDisk(file, "origin")
+		if err != nil {
+			t.Fatalf("readRepoContextFromDisk() error = %v", err)
+		}
+		want := filepath.Join("pkg", "util", "helper.go")
+		if ctx.relPath != want {
+			t.Errorf("relPath = %q, want %q", ctx.relPath, want)
+		}
+		if strings.Contains(ctx.relPath, "..") {
+			t.Errorf("relPath %q escapes the repo root: symlink namespaces disagree", ctx.relPath)
+		}
+	})
+
+	t.Run("unknown remote errors", func(t *testing.T) {
+		if _, err := readRepoContextFromDisk(root, "nope"); err == nil {
+			t.Error("expected an error for an unknown remote")
+		}
+	})
+
+	t.Run("outside a repo errors", func(t *testing.T) {
+		if _, err := readRepoContextFromDisk(t.TempDir(), "origin"); err == nil {
+			t.Error("expected an error outside a repository")
+		}
+	})
+
+	t.Run("a nonexistent path errors", func(t *testing.T) {
+		if _, err := readRepoContextFromDisk(filepath.Join(root, "no-such-file"), "origin"); err == nil {
+			t.Error("expected an error for a path that does not exist")
+		}
+	})
+
+	// The fast path must not answer when something in scope could rewrite the
+	// URL, even though the repository itself is perfectly ordinary.
+	t.Run("an insteadOf in scope sends the caller to git", func(t *testing.T) {
+		pinConfigScope(t)
+		t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t,
+			"[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"))
+		if _, err := readRepoContextFromDisk(root, "origin"); err == nil {
+			t.Error("expected an error when insteadOf is configured")
+		}
+	})
+}
+
+// TestGetRepoContext_FallsBackToGit checks the dispatcher actually falls back
+// rather than propagating the fast path's refusal.
+func TestGetRepoContext_FallsBackToGit(t *testing.T) {
+	pinConfigScope(t)
+	root := newTmpGitRepo(t)
+	runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+
+	// insteadOf is the reason needsGitFallback exists: verified against git
+	// 2.54, `git remote get-url` really does apply the rewrite, so reading the
+	// raw config would report a URL git never uses.
+	t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t,
+		"[url \"https://gitlab.com/mirror/\"]\n\tinsteadOf = https://github.com/example/\n"))
+
+	const rewritten = "https://gitlab.com/mirror/repo"
+	if got := gitOut(t, root, "remote", "get-url", "origin"); got != rewritten+".git" {
+		t.Fatalf("precondition: git remote get-url = %q, want the rewritten URL", got)
+	}
+	if _, err := readRepoContextFromDisk(root, "origin"); err == nil {
+		t.Fatal("precondition: the fast path should refuse a scope containing insteadOf")
+	}
+
+	got, err := getRepoContext(root, "origin")
+	if err != nil {
+		t.Fatalf("getRepoContext() error = %v", err)
+	}
+	if got.baseURL != rewritten {
+		t.Errorf("baseURL = %q, want %q — the dispatcher must return git's answer, not the raw config",
+			got.baseURL, rewritten)
+	}
 }

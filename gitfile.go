@@ -345,13 +345,32 @@ var safeRepoExtensions = map[string]bool{
 // st_dev is not portable through the standard library. It only matters when a
 // mount point sits between the target and the repository root.
 func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error) {
+	l, err := discoverRepoLayout(start)
+	if err != nil {
+		return "", "", "", err
+	}
+	return l.gitDir, l.commonDir, l.workTree, nil
+}
+
+// repoLayout is everything the walk learned about a repository, including the
+// shared config it had to parse anyway to vet it. Carrying the entries here is
+// what keeps the config file parsed once per run instead of once per consumer.
+type repoLayout struct {
+	gitDir    string
+	commonDir string
+	workTree  string
+	config    []configEntry // <commonDir>/config, in file order
+}
+
+// discoverRepoLayout is the walk itself; see discoverGitDir for the contract.
+func discoverRepoLayout(start string) (repoLayout, error) {
 	if name := gitDiscoveryEnvOverride(); name != "" {
-		return "", "", "", fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
+		return repoLayout{}, fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
 	}
 
 	dir, err := filepath.Abs(start)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to resolve %q: %w", start, err)
+		return repoLayout{}, fmt.Errorf("failed to resolve %q: %w", start, err)
 	}
 
 	for {
@@ -367,7 +386,7 @@ func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error
 			if readErr != nil {
 				// git treats an unreadable .git *file* as fatal rather than
 				// walking past it, so stopping here matches.
-				return "", "", "", readErr
+				return repoLayout{}, readErr
 			}
 			return describeRepo(target, dir)
 		}
@@ -380,12 +399,12 @@ func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error
 		// an enclosing repository, which is the one unacceptable outcome, so
 		// the walk stops here even though a work tree cannot be derived.
 		if isGitDirItself(dir) {
-			return "", "", "", fmt.Errorf("%s is a git directory, not a work tree", dir)
+			return repoLayout{}, fmt.Errorf("%s is a git directory, not a work tree", dir)
 		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir { // reached the filesystem root
-			return "", "", "", errors.New("not in a git repository")
+			return repoLayout{}, errors.New("not in a git repository")
 		}
 		dir = parent
 	}
@@ -417,18 +436,22 @@ func isGitDirItself(dir string) bool {
 // repository whenever this check is stricter than git's, which is the one
 // unacceptable outcome. An error only costs the caller a fallback to the git
 // binary.
-func describeRepo(gitDir, workTree string) (string, string, string, error) {
+func describeRepo(gitDir, workTree string) (repoLayout, error) {
 	commonDir, err := resolveCommonDir(gitDir)
 	if err != nil {
-		return "", "", "", err
+		return repoLayout{}, err
 	}
 	if err := checkGitDirLayout(gitDir, commonDir); err != nil {
-		return "", "", "", fmt.Errorf("%s is not a usable git directory: %w", gitDir, err)
+		return repoLayout{}, fmt.Errorf("%s is not a usable git directory: %w", gitDir, err)
 	}
-	if err := checkRepoConfig(gitDir, commonDir, workTree); err != nil {
-		return "", "", "", fmt.Errorf("%s: %w", gitDir, err)
+	entries, err := readConfigFile(filepath.Join(commonDir, "config"))
+	if err != nil {
+		return repoLayout{}, fmt.Errorf("%s: %w", gitDir, err)
 	}
-	return gitDir, commonDir, workTree, nil
+	if err := checkRepoConfig(entries, gitDir, commonDir, workTree); err != nil {
+		return repoLayout{}, fmt.Errorf("%s: %w", gitDir, err)
+	}
+	return repoLayout{gitDir: gitDir, commonDir: commonDir, workTree: workTree, config: entries}, nil
 }
 
 const (
@@ -547,12 +570,7 @@ func validateHeadRef(path string) error {
 // checkRepoConfig refuses the repository shapes where the paths found by the
 // walk would not be the ones git uses: an unknown on-disk format, a bare
 // repository (no work tree at all), or a relocated work tree.
-func checkRepoConfig(gitDir, commonDir, workTree string) error {
-	entries, err := readConfigFile(filepath.Join(commonDir, "config"))
-	if err != nil {
-		return err
-	}
-
+func checkRepoConfig(entries []configEntry, gitDir, commonDir, workTree string) error {
 	if version, ok := lastConfigValue(entries, "core.repositoryformatversion"); ok && version != "0" && version != "1" {
 		return fmt.Errorf("unsupported repository format version %q", version)
 	}
@@ -817,4 +835,73 @@ func fileContainsMarker(path string) bool {
 		}
 	}
 	return false
+}
+
+// readRepoContextFromDisk builds a repoContext by reading .git directly, with
+// no subprocess. It errors rather than guessing whenever the on-disk state is
+// not something it fully understands, so the caller can fall back to git.
+func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error) {
+	dir, err := containingDir(targetPath)
+	if err != nil {
+		return repoContext{}, err
+	}
+
+	layout, err := discoverRepoLayout(dir)
+	if err != nil {
+		return repoContext{}, err
+	}
+
+	// The walk only vets the repository's shape. This is the second gate, on
+	// the configuration that could rewrite the URL out from under us.
+	if needsGitFallback(layout.gitDir, layout.commonDir) {
+		return repoContext{}, errors.New("configuration in scope can rewrite the remote URL")
+	}
+
+	branch, err := branchFromHEAD(layout.gitDir)
+	if err != nil {
+		return repoContext{}, err
+	}
+
+	// firstConfigValue, not lastConfigValue: `git remote get-url` returns a
+	// remote's *first* url line.
+	remoteURL, ok := firstConfigValue(layout.config, "remote."+remoteName+".url")
+	if !ok {
+		return repoContext{}, fmt.Errorf("no URL configured for remote %q", remoteName)
+	}
+
+	relPath, err := relativeToRoot(layout.workTree, targetPath)
+	if err != nil {
+		return repoContext{}, err
+	}
+
+	return repoContext{
+		baseURL: convertToHTTPS(remoteURL),
+		branch:  branch,
+		relPath: relPath,
+	}, nil
+}
+
+// containingDir returns targetPath itself when it is a directory, otherwise its
+// parent.
+func containingDir(targetPath string) (string, error) {
+	info, err := os.Stat(targetPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat path: %w", err)
+	}
+	if info.IsDir() {
+		return targetPath, nil
+	}
+	return filepath.Dir(targetPath), nil
+}
+
+// relativeToRoot computes the repo-relative path, mapping the root itself to "".
+func relativeToRoot(root, targetPath string) (string, error) {
+	rel, err := filepath.Rel(root, targetPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to compute relative path: %w", err)
+	}
+	if rel == "." {
+		return "", nil
+	}
+	return rel, nil
 }
