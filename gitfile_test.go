@@ -56,6 +56,47 @@ func TestParseGitConfig(t *testing.T) {
 			input: "[x]\n\ty = one\\\ntwo\n",
 			want:  []configEntry{{"x.y", "onetwo"}},
 		},
+		// The continuation cases below assert the exact bytes git 2.54 produces;
+		// each was verified against `git config --file <f> --list -z` before
+		// being written down. git's parse_value trims only *trailing*
+		// whitespace, so a continuation line's leading whitespace is part of
+		// the value.
+		{
+			name:  "continuation preserves the next line's leading whitespace",
+			input: "[x]\n\ty = one\\\n   two\n",
+			want:  []configEntry{{"x.y", "one   two"}},
+		},
+		{
+			name:  "continuation inside a quoted value preserves leading whitespace",
+			input: "[x]\n\ty = \"one\\\n   two\"\n",
+			want:  []configEntry{{"x.y", "one   two"}},
+		},
+		{
+			name:  "continuation preserves leading tabs in a URL",
+			input: "[remote \"origin\"]\n\turl = https://example.com/a/\\\n\t\tb.git\n",
+			want:  []configEntry{{"remote.origin.url", "https://example.com/a/\t\tb.git"}},
+		},
+		{
+			// Trailing run of 3: one escaped pair plus a continuation marker.
+			name:  "odd backslash run of three continues the line",
+			input: "[x]\n\ty = a\\\\\\\nb\n",
+			want:  []configEntry{{"x.y", "a\\b"}},
+		},
+		{
+			// Trailing run of 5: two escaped pairs plus a continuation marker.
+			name:  "odd backslash run of five continues the line",
+			input: "[x]\n\ty = a\\\\\\\\\\\nb\n",
+			want:  []configEntry{{"x.y", "a\\\\b"}},
+		},
+		{
+			// Even run: no continuation, the next line is an ordinary key.
+			name:  "even backslash run does not continue the line",
+			input: "[x]\n\ty = a\\\\\n\tb = c\n",
+			want: []configEntry{
+				{"x.y", "a\\"},
+				{"x.b", "c"},
+			},
+		},
 		{
 			name:  "multiple values for the same key keep file order",
 			input: "[remote \"origin\"]\n\turl = first\n\tfetch = f\n\turl = second\n",

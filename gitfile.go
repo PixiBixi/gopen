@@ -48,13 +48,19 @@ func parseGitConfig(r io.Reader) ([]configEntry, error) {
 			return nil, fmt.Errorf("line %d: key %q outside of any section", lineNo, line)
 		}
 
-		// A value ending in a backslash continues on the next line.
-		for strings.HasSuffix(line, `\`) && !strings.HasSuffix(line, `\\`) {
+		// A value continues on the next line when its trailing backslash run has
+		// odd length: the last backslash is the continuation marker and the ones
+		// before it pair up into escaped backslashes.
+		//
+		// The lines are joined verbatim. git's parse_value only trims *trailing*
+		// whitespace of the finished value, so leading whitespace on a
+		// continuation line is part of the value and must be preserved.
+		for trailingBackslashes(line)%2 == 1 {
 			if !sc.Scan() {
 				return nil, fmt.Errorf("line %d: dangling line continuation", lineNo)
 			}
 			lineNo++
-			line = line[:len(line)-1] + strings.TrimSpace(sc.Text())
+			line = line[:len(line)-1] + sc.Text()
 		}
 
 		name, value, err := parseKeyValue(line)
@@ -67,6 +73,16 @@ func parseGitConfig(r io.Reader) ([]configEntry, error) {
 		return nil, fmt.Errorf("reading git config: %w", err)
 	}
 	return entries, nil
+}
+
+// trailingBackslashes counts the backslash run at the end of s. Its parity is
+// what decides a line continuation: an odd run ends in an unescaped backslash.
+func trailingBackslashes(s string) int {
+	n := 0
+	for n < len(s) && s[len(s)-1-n] == '\\' {
+		n++
+	}
+	return n
 }
 
 // parseSectionHeader turns "[remote \"origin\"]" or "[branch.Main]" into the
