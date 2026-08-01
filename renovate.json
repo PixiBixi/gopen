@@ -38,5 +38,16 @@
       "matchDepTypes": ["golang"],
       "groupName": "go-toolchain"
     }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "svu is pinned as a plain env var in the release workflow, which no built-in manager sees",
+      "fileMatch": ["^\\.github/workflows/release\\.yml$"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>.+?)\\s+SVU_VERSION: (?<currentValue>.+?)\\s"
+      ],
+      "versioningTemplate": "semver"
+    }
   ]
 }
