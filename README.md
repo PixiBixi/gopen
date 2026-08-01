@@ -264,12 +264,17 @@ staticcheck ./...
 
 ### Create a release
 
-Releases are automated via [release-please](https://github.com/googleapis/release-please):
+Releases are cut automatically from [Conventional Commits](https://www.conventionalcommits.org/):
 
-1. Push commits to `main` using [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `perf:`, etc.)
-2. release-please opens a release PR with an updated `CHANGELOG.md` and bumped version
-3. Merge the PR — release-please creates the tag automatically
-4. GoReleaser triggers and builds binaries for all platforms, updates the Homebrew tap
+1. Push (or merge) commits to `main` — `feat:` bumps the minor, `fix:` the patch,
+   a breaking change the minor while the project is still `0.x`. Every other type
+   (`chore:`, `docs:`, `ci:`, `perf:`, `refactor:`, `test:`) releases nothing, so
+   mark a change with `fix:` if it needs to ship on its own
+2. The `Release` workflow computes the next `vX.Y.Z` and creates the tag
+3. In the same run, GoReleaser builds the binaries for all platforms and updates
+   the Homebrew tap
+
+Pushing a `v*` tag by hand still triggers the same release path.
 
 ## License
 
