@@ -235,6 +235,56 @@ func TestBranchFromHEAD(t *testing.T) {
 			head:    "",
 			wantErr: true,
 		},
+		{
+			// Confirmed against real git 2.54: `git rev-parse --abbrev-ref
+			// HEAD` and `git symbolic-ref HEAD` both fail on this HEAD, so
+			// silently returning "main garbage" (the pre-fix behavior)
+			// would be a wrong answer, not just an unexpected one.
+			name:    "trailing garbage on the ref line is rejected",
+			head:    "ref: refs/heads/main garbage\n",
+			wantErr: true,
+		},
+		{
+			// Confirmed against real git 2.54: fails the same way. The
+			// pre-fix code returned "main\nextra garbage" here because
+			// strings.TrimSpace only trims the outer edges of the file,
+			// not the embedded newline.
+			name:    "a second line after the ref is rejected",
+			head:    "ref: refs/heads/main\nextra garbage\n",
+			wantErr: true,
+		},
+		{
+			// Confirmed against real git 2.54: an embedded tab in the ref
+			// line also makes git refuse to treat HEAD as a valid ref.
+			name:    "an embedded tab in the branch token is rejected",
+			head:    "ref: refs/heads/main\tfoo\n",
+			wantErr: true,
+		},
+		{
+			// Confirmed against real git 2.54: an embedded carriage
+			// return (not part of a trailing CRLF line ending) also makes
+			// git refuse the ref.
+			name:    "an embedded carriage return in the branch token is rejected",
+			head:    "ref: refs/heads/main\rgarbage\n",
+			wantErr: true,
+		},
+		{
+			// Confirmed against real git 2.54: a trailing CRLF line
+			// ending (as opposed to an embedded CR) is fine; git strips
+			// it and returns "main". Guards against isValidBranchName
+			// rejecting a case strings.TrimSpace already cleans up.
+			name: "a trailing CRLF line ending still resolves",
+			head: "ref: refs/heads/main\r\n",
+			want: "main",
+		},
+		{
+			// Confirmed against real git 2.54: any whitespace (or none)
+			// between "ref:" and the path works, not just a single
+			// space, so a tab here still resolves to "main".
+			name: "a tab between ref: and the path still resolves",
+			head: "ref:\trefs/heads/main\n",
+			want: "main",
+		},
 	}
 
 	for _, tt := range tests {

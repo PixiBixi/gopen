@@ -225,9 +225,19 @@ func branchFromHEAD(gitDir string) (string, error) {
 	}
 	head := strings.TrimSpace(string(raw))
 
-	if ref, ok := strings.CutPrefix(head, "ref: "); ok {
-		branch, ok := strings.CutPrefix(strings.TrimSpace(ref), headRefPrefix)
-		if !ok || branch == "" {
+	// Real git accepts any amount of whitespace (including none at all)
+	// between "ref:" and the path, so trim rather than match a literal
+	// "ref: " prefix.
+	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
+		ref = strings.TrimSpace(ref)
+		branch, ok := strings.CutPrefix(ref, headRefPrefix)
+		// A bare prefix match isn't enough: anything trailing the ref on
+		// the same line (extra tokens, embedded whitespace) or spilling
+		// onto another line would otherwise be swallowed into what looks
+		// like a valid branch name. git itself refuses to treat such a
+		// HEAD as a ref at all, so reject it here too rather than risk
+		// silently returning a name git would never produce.
+		if !ok || !isValidBranchName(branch) {
 			return "", fmt.Errorf("HEAD points at %q, which is not a branch", ref)
 		}
 		return branch, nil
@@ -237,6 +247,24 @@ func branchFromHEAD(gitDir string) (string, error) {
 		return "HEAD", nil // detached
 	}
 	return "", fmt.Errorf("unrecognized HEAD content: %q", head)
+}
+
+// isValidBranchName reports whether s is safe to return as a branch name.
+// It rejects the empty string plus whitespace and other ASCII control
+// characters (including DEL), which is the minimum git itself enforces on
+// ref names. Failing this check means the HEAD content isn't fully
+// understood, so the caller errors out and falls back to the git binary
+// instead of risking a value git would never produce.
+func isValidBranchName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= ' ' || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // isHexSHA reports whether s looks like a git object id.
