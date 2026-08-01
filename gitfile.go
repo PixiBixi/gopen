@@ -300,8 +300,8 @@ var gitDiscoveryEnvVars = []string{
 // safeRepoExtensions lists the extensions.* keys that cannot change how the
 // branch, the remote URL or the work tree are resolved. Anything else — most
 // importantly extensions.refstorage=reftable, where .git/HEAD is the decoy
-// "ref: refs/heads/.invalid", and extensions.worktreeConfig, where a
-// per-worktree config file can override core.* — has to be refused.
+// "ref: refs/heads/.invalid" — has to be refused. extensions.worktreeConfig is
+// handled separately, by reading the per-worktree config it enables.
 var safeRepoExtensions = map[string]bool{
 	"objectformat":       true, // sha1 or sha256; both are plain hex in HEAD
 	"compatobjectformat": true,
@@ -346,7 +346,7 @@ func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error
 		info, statErr := os.Stat(candidate)
 		switch {
 		case statErr != nil:
-			// keep walking up
+			// keep walking up, but see the self test below first
 		case info.IsDir():
 			return describeRepo(candidate, dir)
 		default:
@@ -359,12 +359,41 @@ func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error
 			return describeRepo(target, dir)
 		}
 
+		// git tries, at every level and in this order, <dir>/.git as a file,
+		// <dir>/.git as a directory, then <dir> itself as a git directory.
+		// That last test is how it finds a bare repository, a submodule gitdir
+		// or a linked-worktree gitdir used as the working directory. Skipping
+		// it would let the walk sail past a real git directory and latch onto
+		// an enclosing repository, which is the one unacceptable outcome, so
+		// the walk stops here even though a work tree cannot be derived.
+		if isGitDirItself(dir) {
+			return "", "", "", fmt.Errorf("%s is a git directory, not a work tree", dir)
+		}
+
 		parent := filepath.Dir(dir)
 		if parent == dir { // reached the filesystem root
 			return "", "", "", errors.New("not in a git repository")
 		}
 		dir = parent
 	}
+}
+
+// isGitDirItself reports whether dir is a git directory rather than a work
+// tree, which is git's third test at every level of the walk.
+//
+// The HEAD pre-check keeps the cost to one Lstat for the overwhelmingly common
+// case of an ordinary parent directory, and — more importantly — keeps a stray
+// file named "commondir" somewhere up the tree from aborting the whole walk.
+func isGitDirItself(dir string) bool {
+	if _, err := os.Lstat(filepath.Join(dir, "HEAD")); err != nil {
+		return false
+	}
+	commonDir, err := resolveCommonDir(dir)
+	if err != nil {
+		// A gitdir whose commondir pointer cannot be read is still a gitdir.
+		return true
+	}
+	return checkGitDirLayout(dir, commonDir) == nil
 }
 
 // describeRepo completes and vets a discovery hit.
@@ -514,30 +543,73 @@ func checkRepoConfig(gitDir, commonDir, workTree string) error {
 	if version, ok := lastConfigValue(entries, "core.repositoryformatversion"); ok && version != "0" && version != "1" {
 		return fmt.Errorf("unsupported repository format version %q", version)
 	}
+
+	worktreeConfig := false
 	for _, e := range entries {
 		name, ok := strings.CutPrefix(e.key, "extensions.")
 		if !ok {
 			continue
 		}
-		if name == "refstorage" {
+		switch {
+		case name == "refstorage":
 			if !strings.EqualFold(e.value, "files") {
 				return fmt.Errorf("unsupported ref storage %q", e.value)
 			}
-			continue
-		}
-		if !safeRepoExtensions[name] {
+		case name == "worktreeconfig":
+			// Rejecting on the key alone would be too blunt: `git
+			// sparse-checkout set`, `scalar clone` and `scalar register` all
+			// turn this on permanently, so every sparse-checkout and Scalar
+			// user would lose the fast path for good. Read the extra config
+			// file instead.
+			on, known := configBool(e.value)
+			if !known {
+				return fmt.Errorf("unrecognized extensions.worktreeConfig value %q", e.value)
+			}
+			worktreeConfig = on
+		case !safeRepoExtensions[name]:
 			return fmt.Errorf("unsupported repository extension %q", name)
 		}
 	}
 
-	// core.bare and core.worktree are honoured only in the main worktree: once
-	// inside a linked worktree git ignores whatever the shared config says
-	// about them (checked against git 2.54, including a worktree of a
-	// submodule, whose shared config always carries core.worktree).
-	if gitDir != commonDir {
-		return nil
+	if worktreeConfig {
+		// The per-worktree file lives in the *current* worktree's gitdir, which
+		// for the main worktree is the common dir. Checked against git 2.54: a
+		// linked worktree honours its own worktrees/<n>/config.worktree for
+		// both core.bare and core.worktree, and the main worktree's
+		// .git/config.worktree does not leak into it.
+		wtEntries, err := readOptionalConfigFile(filepath.Join(gitDir, "config.worktree"))
+		if err != nil {
+			return err
+		}
+		if err := checkWorkTreeKeys(wtEntries, gitDir, workTree); err != nil {
+			return err
+		}
 	}
 
+	// With the extension off, the shared config's core.bare and core.worktree
+	// are honoured only in the main worktree: inside a linked worktree git
+	// ignores them (checked against git 2.54, including a worktree of a
+	// submodule, whose shared config always carries core.worktree).
+	//
+	// This shortcut is coupled to extensions.worktreeConfig and must not be
+	// read on its own. Turning the extension on flips the behaviour: git 2.54
+	// then honours the *shared* core.bare and core.worktree in a linked
+	// worktree too, so a shared core.worktree really does relocate
+	// --show-toplevel there. Skipping the check in that state would report a
+	// work tree git does not use.
+	if !worktreeConfig && gitDir != commonDir {
+		return nil
+	}
+	return checkWorkTreeKeys(entries, gitDir, workTree)
+}
+
+// checkWorkTreeKeys refuses the core.bare / core.worktree settings that would
+// make git report a work tree other than the one the walk found.
+//
+// Each config file is vetted on its own rather than merged first. That is
+// stricter than git, which lets config.worktree override the shared config, but
+// the extra strictness can only cost a fallback, never a wrong answer.
+func checkWorkTreeKeys(entries []configEntry, gitDir, workTree string) error {
 	if value, ok := lastConfigValue(entries, "core.bare"); ok {
 		bare, known := configBool(value)
 		if !known {
@@ -550,7 +622,8 @@ func checkRepoConfig(gitDir, commonDir, workTree string) error {
 
 	// core.worktree relocates the work tree. Submodules set it to the directory
 	// that holds the .git file, which is exactly what the walk found; anything
-	// else means git would report a different toplevel.
+	// else means git would report a different toplevel. A relative value is
+	// resolved against the gitdir, including for a linked worktree.
 	value, ok := lastConfigValue(entries, "core.worktree")
 	if !ok {
 		return nil
@@ -578,6 +651,17 @@ func readConfigFile(path string) ([]configEntry, error) {
 		return nil, fmt.Errorf("failed to parse %s: %w", path, err)
 	}
 	return entries, nil
+}
+
+// readOptionalConfigFile is readConfigFile for a file git tolerates the absence
+// of. Only a missing file is benign: an unreadable or malformed one is an error,
+// because its contents could have changed the answer.
+func readOptionalConfigFile(path string) ([]configEntry, error) {
+	entries, err := readConfigFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	return entries, err
 }
 
 // lastConfigValue returns the last value for key in file order, which is what

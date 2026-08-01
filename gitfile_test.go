@@ -566,13 +566,164 @@ func TestDiscoverGitDir_RefusesWhatItCannotReproduce(t *testing.T) {
 		}
 	})
 
-	t.Run("worktree config extension", func(t *testing.T) {
+	// A git directory is not a work tree. Walking past it would silently name
+	// the enclosing repository instead, which is the one unacceptable outcome.
+	t.Run("start is itself a git directory", func(t *testing.T) {
 		root := newTmpGitRepo(t)
-		runGit(t, root, "config", "core.repositoryformatversion", "1")
-		runGit(t, root, "config", "extensions.worktreeConfig", "true")
-		if _, _, _, err := discoverGitDir(root); err == nil {
-			t.Error("expected an error when per-worktree config may override core.*")
+		runGit(t, root, "worktree", "add", "-q", "-b", "wtb", filepath.Join(t.TempDir(), "wt"))
+		super, _ := newTmpSubmodule(t)
+
+		// A bare repo nested inside a work tree: the walk used to skip it and
+		// report the enclosing repository.
+		bare := filepath.Join(root, "nested.git")
+		runGit(t, root, "init", "--bare", bare)
+
+		for _, tc := range []struct{ name, start string }{
+			{"the gitdir itself", filepath.Join(root, ".git")},
+			{"a subdirectory of the gitdir", mkdirAll(t, filepath.Join(root, ".git", "hooks"))},
+			{"refs inside the gitdir", filepath.Join(root, ".git", "refs")},
+			{"a linked worktree gitdir", filepath.Join(root, ".git", "worktrees", "wt")},
+			{"a submodule gitdir", filepath.Join(super, ".git", "modules", "sub")},
+			{"a bare repo nested in a work tree", bare},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				// git either refuses outright or names a repository that is
+				// never the one the naive walk would reach; either way the
+				// fast path must not answer.
+				if _, _, _, err := discoverGitDir(tc.start); err == nil {
+					t.Errorf("discoverGitDir(%q) succeeded, but git refuses it or names another repository", tc.start)
+				}
+			})
 		}
+	})
+
+	t.Run("worktree config extension", func(t *testing.T) {
+		// extensions.worktreeConfig only matters for what config.worktree
+		// actually contains; rejecting on the key alone would permanently
+		// disable the fast path for every sparse-checkout and Scalar user.
+		enable := func(t *testing.T, root string) {
+			t.Helper()
+			runGit(t, root, "config", "core.repositoryformatversion", "1")
+			runGit(t, root, "config", "extensions.worktreeConfig", "true")
+		}
+
+		t.Run("enabled with no config.worktree is fine", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			enable(t, root)
+			assertMatchesGit(t, root)
+		})
+
+		t.Run("disabled is inert", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			runGit(t, root, "config", "core.repositoryformatversion", "1")
+			runGit(t, root, "config", "extensions.worktreeConfig", "false")
+			assertMatchesGit(t, root)
+		})
+
+		t.Run("sparse-checkout keeps the fast path", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			if err := tryGit(root, "sparse-checkout", "set", "--cone"); err != nil {
+				t.Skipf("git sparse-checkout unavailable: %v", err)
+			}
+			if got := gitOut(t, root, "config", "--local", "extensions.worktreeConfig"); got != "true" {
+				t.Fatalf("precondition: extensions.worktreeConfig = %q, want true", got)
+			}
+			assertMatchesGit(t, root)
+		})
+
+		t.Run("unparsable value is refused", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			runGit(t, root, "config", "core.repositoryformatversion", "1")
+			runGit(t, root, "config", "extensions.worktreeConfig", "perhaps")
+			if _, _, _, err := discoverGitDir(root); err == nil {
+				t.Error("expected an error for an uninterpretable extensions.worktreeConfig")
+			}
+		})
+
+		t.Run("main worktree config.worktree relocates the work tree", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			enable(t, root)
+			elsewhere := t.TempDir()
+			writeFile(t, filepath.Join(root, ".git", "config.worktree"),
+				"[core]\n\tworktree = "+elsewhere+"\n")
+
+			if got, want := realPath(t, gitOut(t, root, "rev-parse", "--show-toplevel")), realPath(t, elsewhere); got != want {
+				t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+			}
+			if _, _, _, err := discoverGitDir(root); err == nil {
+				t.Error("expected an error when config.worktree relocates the work tree")
+			}
+		})
+
+		t.Run("main worktree config.worktree can declare the repo bare", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			enable(t, root)
+			writeFile(t, filepath.Join(root, ".git", "config.worktree"), "[core]\n\tbare = true\n")
+			if err := tryGit(root, "rev-parse", "--show-toplevel"); err == nil {
+				t.Fatal("precondition: git should refuse a bare repository")
+			}
+			if _, _, _, err := discoverGitDir(root); err == nil {
+				t.Error("expected an error when config.worktree declares the repo bare")
+			}
+		})
+
+		t.Run("linked worktree honours its own config.worktree", func(t *testing.T) {
+			root := newTmpGitRepo(t)
+			enable(t, root)
+			wt := filepath.Join(t.TempDir(), "wt")
+			runGit(t, root, "worktree", "add", "-q", "-b", "wtcfg", wt)
+			assertMatchesGit(t, wt) // nothing set yet: the fast path still works
+
+			elsewhere := t.TempDir()
+			// The worktree's gitdir is named after the checkout directory, not
+			// the branch, so ask git for it rather than guessing.
+			writeFile(t, filepath.Join(gitOut(t, wt, "rev-parse", "--absolute-git-dir"), "config.worktree"),
+				"[core]\n\tworktree = "+elsewhere+"\n")
+			if got, want := realPath(t, gitOut(t, wt, "rev-parse", "--show-toplevel")), realPath(t, elsewhere); got != want {
+				t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+			}
+			if _, _, _, err := discoverGitDir(wt); err == nil {
+				t.Error("expected an error when the worktree's config.worktree relocates the work tree")
+			}
+		})
+	})
+
+	// This pins the pairing that makes the gitDir != commonDir shortcut in
+	// checkRepoConfig safe. The shortcut rests on git ignoring the shared
+	// core.bare / core.worktree inside a linked worktree — which is only true
+	// while extensions.worktreeConfig is off. Verified against git 2.54.
+	t.Run("shared core.worktree in a linked worktree depends on worktreeConfig", func(t *testing.T) {
+		build := func(t *testing.T, extensionOn bool) (wt, elsewhere string) {
+			t.Helper()
+			root := newTmpGitRepo(t)
+			if extensionOn {
+				runGit(t, root, "config", "core.repositoryformatversion", "1")
+				runGit(t, root, "config", "extensions.worktreeConfig", "true")
+			}
+			wt = filepath.Join(t.TempDir(), "wt")
+			runGit(t, root, "worktree", "add", "-q", "-b", "shared", wt)
+			elsewhere = t.TempDir()
+			runGit(t, root, "config", "core.worktree", elsewhere)
+			return wt, elsewhere
+		}
+
+		t.Run("extension off: git ignores it, so the fast path may answer", func(t *testing.T) {
+			wt, _ := build(t, false)
+			if got, want := realPath(t, gitOut(t, wt, "rev-parse", "--show-toplevel")), realPath(t, wt); got != want {
+				t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+			}
+			assertMatchesGit(t, wt)
+		})
+
+		t.Run("extension on: git honours it, so the fast path must refuse", func(t *testing.T) {
+			wt, elsewhere := build(t, true)
+			if got, want := realPath(t, gitOut(t, wt, "rev-parse", "--show-toplevel")), realPath(t, elsewhere); got != want {
+				t.Fatalf("precondition: git toplevel = %q, want %q", got, want)
+			}
+			if _, _, _, err := discoverGitDir(wt); err == nil {
+				t.Error("expected an error: the shared core.worktree relocates this worktree")
+			}
+		})
 	})
 
 	t.Run("environment overrides", func(t *testing.T) {
