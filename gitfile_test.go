@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1493,6 +1494,177 @@ func TestGetRepoContext_FallsBackToGit(t *testing.T) {
 		t.Errorf("baseURL = %q, want %q — the dispatcher must return git's answer, not the raw config",
 			got.baseURL, rewritten)
 	}
+}
+
+// --- resolveTarget ---
+
+// TestResolveTarget asserts resolveTarget's output directly against an oracle
+// independent of gopen's own code: filepath.EvalSymlinks computed in the test
+// on the containing directory only, joined with the unresolved
+// filepath.Base of the original path. It must not compare the fast path
+// against the git fallback — both call resolveTarget, so a symmetric bug in
+// it would pass either way. See the case "symlinked file whose destination is
+// elsewhere" and "symlink into a different directory tree": a regression that
+// resolves the whole targetPath (instead of only its containing directory)
+// would follow the link all the way to its destination and rename the
+// basename to match, which these cases catch.
+func TestResolveTarget(t *testing.T) {
+	symlinkOK := runtime.GOOS != "windows"
+	skipNoSymlink := func(t *testing.T) {
+		t.Helper()
+		if !symlinkOK {
+			t.Skip("creating symlinks requires elevated privileges on Windows")
+		}
+	}
+
+	t.Run("plain file in plain directory", func(t *testing.T) {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, "file.txt"), "hello")
+		targetPath := filepath.Join(root, "file.txt")
+
+		gotDir, gotTarget, err := resolveTarget(targetPath)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", targetPath, err)
+		}
+		wantDir := realPath(t, root)
+		wantTarget := filepath.Join(wantDir, "file.txt")
+		if gotDir != wantDir {
+			t.Errorf("dir = %q, want %q", gotDir, wantDir)
+		}
+		if gotTarget != wantTarget {
+			t.Errorf("target = %q, want %q", gotTarget, wantTarget)
+		}
+	})
+
+	t.Run("plain directory as target", func(t *testing.T) {
+		root := t.TempDir()
+		sub := mkdirAll(t, filepath.Join(root, "sub"))
+
+		gotDir, gotTarget, err := resolveTarget(sub)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", sub, err)
+		}
+		want := realPath(t, sub)
+		if gotDir != want || gotTarget != want {
+			t.Errorf("dir, target = %q, %q, want %q, %q — a directory target must resolve to itself in both return values",
+				gotDir, gotTarget, want, want)
+		}
+	})
+
+	t.Run("file through a symlinked parent directory", func(t *testing.T) {
+		skipNoSymlink(t)
+		root := t.TempDir()
+		real := mkdirAll(t, filepath.Join(root, "realdir"))
+		writeFile(t, filepath.Join(real, "file.txt"), "hello")
+		link := filepath.Join(root, "linkdir")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		targetPath := filepath.Join(link, "file.txt")
+
+		gotDir, gotTarget, err := resolveTarget(targetPath)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", targetPath, err)
+		}
+		wantDir := realPath(t, real)
+		wantTarget := filepath.Join(wantDir, "file.txt")
+		if gotDir != wantDir {
+			t.Errorf("dir = %q, want %q — a symlinked parent directory (the macOS /var shape) must resolve", gotDir, wantDir)
+		}
+		if gotTarget != wantTarget {
+			t.Errorf("target = %q, want %q", gotTarget, wantTarget)
+		}
+	})
+
+	t.Run("symlinked file whose destination is elsewhere", func(t *testing.T) {
+		skipNoSymlink(t)
+		root := t.TempDir()
+		destDir := mkdirAll(t, filepath.Join(root, "dest"))
+		dest := filepath.Join(destDir, "actual.txt")
+		writeFile(t, dest, "hello")
+		link := filepath.Join(root, "mylink.txt")
+		if err := os.Symlink(dest, link); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		gotDir, gotTarget, err := resolveTarget(link)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", link, err)
+		}
+		wantDir := realPath(t, root)
+		wantTarget := filepath.Join(wantDir, "mylink.txt")
+		if gotDir != wantDir {
+			t.Errorf("dir = %q, want %q", gotDir, wantDir)
+		}
+		if gotTarget != wantTarget {
+			t.Errorf("target = %q, want %q — the basename must stay the link's own name (mylink.txt), not the destination's (actual.txt)",
+				gotTarget, wantTarget)
+		}
+	})
+
+	t.Run("symlink into a different directory tree", func(t *testing.T) {
+		skipNoSymlink(t)
+		root1 := t.TempDir()
+		root2 := t.TempDir()
+		destDir := mkdirAll(t, filepath.Join(root2, "otherrepo"))
+		dest := filepath.Join(destDir, "target.txt")
+		writeFile(t, dest, "hello")
+		link := filepath.Join(root1, "pointer.txt")
+		if err := os.Symlink(dest, link); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		gotDir, gotTarget, err := resolveTarget(link)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", link, err)
+		}
+		wantDir := realPath(t, root1)
+		wantTarget := filepath.Join(wantDir, "pointer.txt")
+		if gotDir != wantDir {
+			t.Errorf("dir = %q, want %q — must stay in the link's own tree (root1), not jump into the target's (root2)",
+				gotDir, wantDir)
+		}
+		if gotTarget != wantTarget {
+			t.Errorf("target = %q, want %q", gotTarget, wantTarget)
+		}
+	})
+
+	t.Run("symlinked directory as the target itself", func(t *testing.T) {
+		skipNoSymlink(t)
+		root := t.TempDir()
+		real := mkdirAll(t, filepath.Join(root, "realdir2"))
+		link := filepath.Join(root, "linkdir2")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+
+		gotDir, gotTarget, err := resolveTarget(link)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", link, err)
+		}
+		want := realPath(t, real)
+		if gotDir != want {
+			t.Errorf("dir = %q, want %q", gotDir, want)
+		}
+		if gotTarget != want {
+			t.Errorf("target = %q, want %q — a symlinked directory target must resolve to its destination", gotTarget, want)
+		}
+	})
+
+	t.Run("directory target with a trailing separator", func(t *testing.T) {
+		root := t.TempDir()
+		sub := mkdirAll(t, filepath.Join(root, "sub"))
+		targetPath := sub + string(filepath.Separator)
+
+		gotDir, gotTarget, err := resolveTarget(targetPath)
+		if err != nil {
+			t.Fatalf("resolveTarget(%q): %v", targetPath, err)
+		}
+		want := realPath(t, sub)
+		if gotDir != want || gotTarget != want {
+			t.Errorf("dir, target = %q, %q, want %q, %q", gotDir, gotTarget, want, want)
+		}
+	})
 }
 
 // --- the differential test ---
