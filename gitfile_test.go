@@ -326,7 +326,7 @@ func assertFileExists(t *testing.T, path string) {
 	}
 }
 
-func mkdirAll(t *testing.T, path string) string {
+func mkdirAll(t testing.TB, path string) string {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
@@ -334,7 +334,7 @@ func mkdirAll(t *testing.T, path string) string {
 	return path
 }
 
-func writeFile(t *testing.T, path, content string) {
+func writeFile(t testing.TB, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
@@ -855,10 +855,17 @@ func TestConfigBool(t *testing.T) {
 
 // --- needsGitFallback ---
 
+// envTB is testing.TB plus Setenv, which the TB interface itself does not
+// carry, so that both tests and benchmarks can pin their environment.
+type envTB interface {
+	testing.TB
+	Setenv(key, value string)
+}
+
 // pinConfigScope isolates a test from the machine's real git configuration.
 // GIT_CONFIG_NOSYSTEM is deliberately left unset so that the system scope is
 // still exercised, pinned to an empty file through GIT_CONFIG_SYSTEM.
-func pinConfigScope(t *testing.T) {
+func pinConfigScope(t envTB) {
 	t.Helper()
 	empty := filepath.Join(t.TempDir(), "empty-gitconfig")
 	writeFile(t, empty, "")
@@ -877,7 +884,7 @@ func pinConfigScope(t *testing.T) {
 // unsetEnv removes a variable for the duration of the test. t.Setenv cannot do
 // this on its own, and setting it to the empty string is not equivalent: git
 // itself rejects an empty GIT_DIR with "The empty string is not a valid path".
-func unsetEnv(t *testing.T, name string) {
+func unsetEnv(t envTB, name string) {
 	t.Helper()
 	t.Setenv(name, "") // registers the restore of the original value
 	if err := os.Unsetenv(name); err != nil {
@@ -1187,4 +1194,319 @@ func TestGetRepoContext_FallsBackToGit(t *testing.T) {
 		t.Errorf("baseURL = %q, want %q — the dispatcher must return git's answer, not the raw config",
 			got.baseURL, rewritten)
 	}
+}
+
+// --- the differential test ---
+
+// TestDifferential_FastPathMatchesGit is the core guarantee of this design:
+// for every repository shape gopen supports, reading .git directly must yield
+// exactly what shelling out to git yields. A divergence here is a bug that
+// would send the user to the wrong URL, so a failure means fixing gitfile.go,
+// never the assertion.
+func TestDifferential_FastPathMatchesGit(t *testing.T) {
+	fixtures := []struct {
+		name   string
+		remote string
+		build  func(t *testing.T) (targetPath string)
+	}{
+		{
+			name:   "plain repo, HTTPS remote, root",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				return root
+			},
+		},
+		{
+			name:   "plain repo, SSH remote, root",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "git@github.com:example/repo.git")
+				return root
+			},
+		},
+		{
+			name:   "nested file",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				file := filepath.Join(mkdirAll(t, filepath.Join(root, "pkg", "util")), "helper.go")
+				writeFile(t, file, "")
+				return file
+			},
+		},
+		{
+			name:   "nested directory",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				return mkdirAll(t, filepath.Join(root, "a", "b", "c"))
+			},
+		},
+		{
+			name:   "branch name containing slashes",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				runGit(t, root, "checkout", "-q", "-b", "feature/foo/bar")
+				return root
+			},
+		},
+		{
+			name:   "branch name with dots and unicode",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				runGit(t, root, "checkout", "-q", "-b", "release-1.2.x-café")
+				return root
+			},
+		},
+		{
+			name:   "detached HEAD",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				runGit(t, root, "checkout", "-q", "--detach", "HEAD")
+				return root
+			},
+		},
+		{
+			name:   "non-default remote name",
+			remote: "upstream",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/fork.git")
+				runGit(t, root, "remote", "add", "upstream", "https://gitlab.com/example/up.git")
+				return root
+			},
+		},
+		{
+			name:   "remote with several url lines, first must win",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/first.git")
+				runGit(t, root, "remote", "set-url", "--add", "origin", "https://github.com/example/second.git")
+				return root
+			},
+		},
+		{
+			name:   "remote name with mixed case, which git keeps verbatim",
+			remote: "MyRemote",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "MyRemote", "https://github.com/example/repo.git")
+				return root
+			},
+		},
+		{
+			name:   "linked worktree",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				wt := filepath.Join(t.TempDir(), "wt")
+				runGit(t, root, "worktree", "add", "-q", "-b", "wt-branch", wt)
+				return wt
+			},
+		},
+		{
+			name:   "file inside a linked worktree",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				wt := filepath.Join(t.TempDir(), "wt")
+				runGit(t, root, "worktree", "add", "-q", "-b", "wt2", wt)
+				file := filepath.Join(wt, "inside.go")
+				writeFile(t, file, "")
+				return file
+			},
+		},
+		{
+			name:   "submodule",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				_, sub := newTmpSubmoduleWithRemote(t)
+				return sub
+			},
+		},
+		{
+			name:   "file inside a submodule",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				_, sub := newTmpSubmoduleWithRemote(t)
+				file := filepath.Join(mkdirAll(t, filepath.Join(sub, "deep")), "f.go")
+				writeFile(t, file, "")
+				return file
+			},
+		},
+		{
+			name:   "worktree of a submodule",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				_, sub := newTmpSubmoduleWithRemote(t)
+				wt := filepath.Join(t.TempDir(), "subwt")
+				runGit(t, sub, "worktree", "add", "-q", "-b", "sub-wt", wt)
+				return wt
+			},
+		},
+		{
+			// extensions.worktreeConfig is on here, which used to disqualify
+			// the fast path outright.
+			name:   "sparse-checkout repository",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				if err := tryGit(root, "sparse-checkout", "set", "--cone"); err != nil {
+					t.Skipf("git sparse-checkout unavailable: %v", err)
+				}
+				return root
+			},
+		},
+		{
+			// The two paths live in different namespaces here: the fast path
+			// keeps the caller's symlinked path, git reports the real one.
+			// relPath must still come out identical.
+			name:   "target reached through a symlinked parent",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				file := filepath.Join(mkdirAll(t, filepath.Join(root, "pkg")), "x.go")
+				writeFile(t, file, "")
+
+				link := filepath.Join(t.TempDir(), "link")
+				if err := os.Symlink(root, link); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				return filepath.Join(link, "pkg", "x.go")
+			},
+		},
+	}
+
+	for _, f := range fixtures {
+		t.Run(f.name, func(t *testing.T) {
+			pinConfigScope(t)
+			target := f.build(t)
+
+			fast, fastErr := readRepoContextFromDisk(target, f.remote)
+			slow, slowErr := repoContextViaGit(target, f.remote)
+
+			if (fastErr == nil) != (slowErr == nil) {
+				t.Fatalf("error disagreement:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
+			}
+			if fastErr != nil {
+				return // both failed, which is consistent
+			}
+			if fast != slow {
+				t.Errorf("fast path diverges from git:\n  fast: %+v\n  git:  %+v", fast, slow)
+			}
+		})
+	}
+}
+
+// TestDifferential_ErrorCases checks the two paths agree on failure too.
+func TestDifferential_ErrorCases(t *testing.T) {
+	cases := []struct {
+		name   string
+		remote string
+		build  func(t *testing.T) string
+	}{
+		{
+			name:   "unknown remote",
+			remote: "nope",
+			build: func(t *testing.T) string {
+				root := newTmpGitRepo(t)
+				runGit(t, root, "remote", "add", "origin", "https://github.com/example/repo.git")
+				return root
+			},
+		},
+		{
+			name:   "no remote at all",
+			remote: "origin",
+			build:  func(t *testing.T) string { return newTmpGitRepo(t) },
+		},
+		{
+			name:   "outside any repository",
+			remote: "origin",
+			build:  func(t *testing.T) string { return t.TempDir() },
+		},
+		{
+			name:   "path that does not exist",
+			remote: "origin",
+			build:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") },
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pinConfigScope(t)
+			target := c.build(t)
+			_, fastErr := readRepoContextFromDisk(target, c.remote)
+			_, slowErr := repoContextViaGit(target, c.remote)
+			if (fastErr == nil) != (slowErr == nil) {
+				t.Errorf("disagreement:\n  fast path: %v\n  git path:  %v", fastErr, slowErr)
+			}
+		})
+	}
+}
+
+// newTmpSubmoduleWithRemote is newTmpSubmodule with a web-shaped "origin" on
+// the submodule itself, so the differential fixtures have a URL to resolve.
+// `submodule add` already creates an origin pointing at the local source, so
+// this is a set-url rather than an add.
+func newTmpSubmoduleWithRemote(t *testing.T) (super, sub string) {
+	t.Helper()
+	super, sub = newTmpSubmodule(t)
+	runGit(t, sub, "remote", "set-url", "origin", "https://github.com/example/inner.git")
+	return super, sub
+}
+
+func BenchmarkGetRepoContext(b *testing.B) {
+	// Without this the benchmark silently measures the fallback twice: a real
+	// ~/.gitconfig containing includeIf (or insteadOf) disqualifies the fast
+	// path for every repository on the machine.
+	pinConfigScope(b)
+
+	dir := b.TempDir()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "bench@test.com"},
+		{"config", "user.name", "Bench"},
+		{"commit", "--allow-empty", "-m", "init"},
+		{"remote", "add", "origin", "https://github.com/example/repo.git"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			b.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	b.Run("pure-go", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := readRepoContextFromDisk(dir, "origin"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+
+	b.Run("subprocess", func(b *testing.B) {
+		b.ReportAllocs()
+		for b.Loop() {
+			if _, err := repoContextViaGit(dir, "origin"); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
 }
