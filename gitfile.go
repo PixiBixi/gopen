@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -209,4 +211,45 @@ func firstConfigValue(entries []configEntry, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+const headRefPrefix = "refs/heads/"
+
+// branchFromHEAD reads gitDir/HEAD and returns the short branch name.
+// A detached HEAD yields the literal "HEAD", which is what
+// `git rev-parse --abbrev-ref HEAD` prints in that state.
+func branchFromHEAD(gitDir string) (string, error) {
+	raw, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return "", fmt.Errorf("failed to read HEAD: %w", err)
+	}
+	head := strings.TrimSpace(string(raw))
+
+	if ref, ok := strings.CutPrefix(head, "ref: "); ok {
+		branch, ok := strings.CutPrefix(strings.TrimSpace(ref), headRefPrefix)
+		if !ok || branch == "" {
+			return "", fmt.Errorf("HEAD points at %q, which is not a branch", ref)
+		}
+		return branch, nil
+	}
+
+	if isHexSHA(head) {
+		return "HEAD", nil // detached
+	}
+	return "", fmt.Errorf("unrecognized HEAD content: %q", head)
+}
+
+// isHexSHA reports whether s looks like a git object id.
+func isHexSHA(s string) bool {
+	// 40 hex chars for SHA-1, 64 for SHA-256.
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
+			return false
+		}
+	}
+	return true
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -187,6 +189,79 @@ func TestFirstConfigValue(t *testing.T) {
 	t.Run("reports a missing key", func(t *testing.T) {
 		if _, ok := firstConfigValue(entries, "remote.upstream.url"); ok {
 			t.Error("expected the key to be absent")
+		}
+	})
+}
+
+func TestBranchFromHEAD(t *testing.T) {
+	tests := []struct {
+		name    string
+		head    string
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "simple branch",
+			head: "ref: refs/heads/main\n",
+			want: "main",
+		},
+		{
+			name: "slashes in the branch name are preserved",
+			head: "ref: refs/heads/feature/foo/bar\n",
+			want: "feature/foo/bar",
+		},
+		{
+			name: "no trailing newline",
+			head: "ref: refs/heads/main",
+			want: "main",
+		},
+		{
+			name: "detached HEAD returns the literal HEAD, as git does",
+			head: "9f2c1b7e4a8d3f6019b5c2e7a4d8f1b3c6e9a2d5\n",
+			want: "HEAD",
+		},
+		{
+			name:    "symref outside refs/heads is not a branch",
+			head:    "ref: refs/tags/v1.0.0\n",
+			wantErr: true,
+		},
+		{
+			name:    "garbage",
+			head:    "not a ref at all\n",
+			wantErr: true,
+		},
+		{
+			name:    "empty file",
+			head:    "",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte(tt.head), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := branchFromHEAD(dir)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("branchFromHEAD() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("branchFromHEAD() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("missing HEAD file errors", func(t *testing.T) {
+		if _, err := branchFromHEAD(t.TempDir()); err == nil {
+			t.Error("expected an error for a missing HEAD file")
 		}
 	})
 }
