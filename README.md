@@ -254,6 +254,10 @@ git://github.com/user/repo.git            → https://github.com/user/repo
 https://github.com/user/repo.git          → https://github.com/user/repo
 ```
 
+## How it works
+
+gopen reads `.git` directly (config, `HEAD`, worktree layout) instead of shelling out to `git`, which makes most runs faster. Whenever it hits a git configuration it can't fully account for (config includes, worktree config, custom ref storage, and similar) it falls back to invoking the `git` binary, so the result is always exactly what `git` itself would report.
+
 ## Requirements
 
 - Git installed and in PATH
