@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -721,22 +720,15 @@ func configBool(value string) (result, known bool) {
 	return false, false
 }
 
-// fallbackMarkers are config directives the fast path does not implement.
-// Their mere presence anywhere in scope sends the whole lookup to git, because
-// any of them can change the remote URL that would otherwise be reported.
-//
-// "insteadof" also catches pushInsteadOf, and "[include" also catches
-// "[include \"x\"]". Both over-match, which costs at most one fork.
-var fallbackMarkers = []string{"insteadof", "[include", "includeif"}
-
 // needsGitFallback reports whether the pure-Go path must defer to the git
 // binary. It is deliberately conservative: a false positive costs one fork, a
 // false negative costs a wrong URL.
 //
-// The scan is a raw lowercase substring match, not a parse. A config file that
-// merely mentions one of the markers in a comment or a remote URL loses the
-// fast path, which is the cheap side of the trade.
-func needsGitFallback(gitDir, commonDir string) bool {
+// The work is delegated to configScanner, which parses every scope git would
+// read and follows its include directives, so that an include only disqualifies
+// the fast path when the file it pulls in really does define something the
+// answer depends on.
+func needsGitFallback(gitDir, commonDir, remoteName string) bool {
 	if gitDiscoveryEnvOverride() != "" {
 		return true
 	}
@@ -745,18 +737,31 @@ func needsGitFallback(gitDir, commonDir string) bool {
 	if os.Getenv("GIT_CONFIG_COUNT") != "" {
 		return true
 	}
-	return slices.ContainsFunc(configScopePaths(gitDir, commonDir), fileContainsMarker)
+
+	s := configScanner{gitDir: gitDir, remoteURLKey: "remote." + remoteName + ".url"}
+	for _, p := range outerConfigScopePaths() {
+		if s.scanFile(p, false, 0) {
+			return true
+		}
+	}
+	for _, p := range repoConfigScopePaths(gitDir, commonDir) {
+		if s.scanFile(p, true, 0) {
+			return true
+		}
+	}
+	return false
 }
 
-// configScopePaths lists the config files git would consult, in scope order.
-// Paths that do not exist are harmless; they simply contribute nothing.
+// outerConfigScopePaths lists the system and global config files, the scopes
+// that sit above the repository. Paths that do not exist are harmless; they
+// simply contribute nothing.
 //
 // Known and accepted gap: the system config path is compiled into the git
 // binary (ETC_GITCONFIG), so it can only be guessed. systemConfigPaths covers
 // the standard location and the one implied by where git sits on PATH, which
 // together cover Homebrew, the usual Linux packages and Git for Windows. A git
 // built with an unusual prefix would have its system config missed.
-func configScopePaths(gitDir, commonDir string) []string {
+func outerConfigScopePaths() []string {
 	var paths []string
 
 	// git_env_bool: only a true-ish value suppresses the system config, and an
@@ -770,20 +775,25 @@ func configScopePaths(gitDir, commonDir string) []string {
 	}
 
 	if p := os.Getenv("GIT_CONFIG_GLOBAL"); p != "" {
-		paths = append(paths, p)
-	} else {
-		// git reads both the XDG file and ~/.gitconfig, and falls back to
-		// ~/.config/git/config when XDG_CONFIG_HOME is unset.
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			paths = append(paths, filepath.Join(xdg, "git", "config"))
-		} else if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".config", "git", "config"))
-		}
-		if home, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(home, ".gitconfig"))
-		}
+		return append(paths, p)
 	}
+	// git reads both the XDG file and ~/.gitconfig, and falls back to
+	// ~/.config/git/config when XDG_CONFIG_HOME is unset.
+	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+		paths = append(paths, filepath.Join(xdg, "git", "config"))
+	} else if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".config", "git", "config"))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(home, ".gitconfig"))
+	}
+	return paths
+}
 
+// repoConfigScopePaths lists the repository's own config files: the shared one
+// and the per-worktree ones.
+func repoConfigScopePaths(gitDir, commonDir string) []string {
+	var paths []string
 	if commonDir != "" {
 		paths = append(paths, filepath.Join(commonDir, "config"))
 	}
@@ -820,21 +830,304 @@ func systemConfigPaths() []string {
 	return paths
 }
 
-// fileContainsMarker reports whether path holds any fallback marker. An absent
-// file is not a marker. An unreadable one is: git may well be able to read what
-// this process cannot, and its contents could change the URL.
-func fileContainsMarker(path string) bool {
-	raw, err := os.ReadFile(path) // #nosec G304 -- paths come from git's own config scopes
+const (
+	// maxIncludeDepth mirrors git's MAX_INCLUDE_DEPTH. Checked against git
+	// 2.54: a chain of ten nested includes is read, an eleventh aborts the
+	// whole command with "exceeded maximum include depth (10)". Matching the
+	// number matters because past it git fails, so the fast path must fail too
+	// rather than quietly answer where git would not.
+	maxIncludeDepth = 10
+
+	// maxIncludeFiles bounds how many files one scan may open, so a config that
+	// fans out at every level cannot make the fast path slower than the fork it
+	// replaces. Reaching it means falling back.
+	maxIncludeFiles = 128
+)
+
+// configScanner decides whether anything in the config scopes could make the
+// fast path's answer differ from git's.
+//
+// It resolves include directives rather than refusing on sight: an include only
+// matters when the file it pulls in actually defines something the answer
+// depends on, and `includeIf` is common enough in corporate setups that
+// refusing on the keyword alone disabled the fast path for entire populations.
+//
+// The scanner never merges what it finds. It only ever answers "the git binary
+// must handle this", so every uncertainty resolves to a fallback.
+type configScanner struct {
+	gitDir       string // the repository's git directory, for gitdir: conditions
+	remoteURLKey string // remote.<name>.url, the one key the fast path reads
+
+	gitDirReal string // symlink-resolved gitDir, computed on first use
+	resolved   bool   // whether gitDirReal has been computed
+	filesRead  int
+	forced     bool // git would abort where the scan could not follow it
+}
+
+// scanFile reports whether path, or anything it includes, forces the fallback.
+//
+// own marks the repository's own config files. Those the fast path reads and
+// vets itself, so only a URL rewrite disqualifies them. Every other file —
+// system, global, and anything included from anywhere — is judged more strictly
+// because its contents are never merged in.
+func (s *configScanner) scanFile(path string, own bool, depth int) bool {
+	s.filesRead++
+	if s.filesRead > maxIncludeFiles {
+		return true
+	}
+
+	entries, err := readConfigFile(path)
 	if err != nil {
+		// An absent file contributes nothing. An unreadable or malformed one
+		// could hold anything, and git may well parse what this cannot.
 		return !errors.Is(err, os.ErrNotExist)
 	}
-	lower := strings.ToLower(string(raw))
-	for _, m := range fallbackMarkers {
-		if strings.Contains(lower, m) {
+
+	for _, e := range entries {
+		if rewritesRemoteURL(e.key) {
+			return true
+		}
+		if !own && (e.key == s.remoteURLKey || affectsRepoLayout(e.key)) {
+			return true
+		}
+
+		cond, isInclude := includeDirective(e.key)
+		if !isInclude {
+			continue
+		}
+		if cond != "" {
+			mayHold := s.conditionMayHold(cond)
+			if s.forced {
+				return true
+			}
+			if !mayHold {
+				continue
+			}
+		}
+		if depth+1 > maxIncludeDepth {
+			return true // git aborts past this depth
+		}
+		target, ok := s.includeTarget(e.value, path)
+		if !ok {
+			return true
+		}
+		if s.scanFile(target, false, depth+1) {
 			return true
 		}
 	}
 	return false
+}
+
+// rewritesRemoteURL reports whether key is a url.<base>.insteadOf or
+// url.<base>.pushInsteadOf, the directives that rewrite a remote's URL. They
+// disqualify the fast path from any scope, including the repository's own
+// config, because the fast path reports the raw configured URL.
+func rewritesRemoteURL(key string) bool {
+	return strings.HasPrefix(key, "url.") &&
+		(strings.HasSuffix(key, ".insteadof") || strings.HasSuffix(key, ".pushinsteadof"))
+}
+
+// affectsRepoLayout reports whether key could move the work tree or change how
+// the repository is read. checkRepoConfig vets these in the repository's own
+// config; seeing one anywhere else means the scan is out of its depth.
+//
+// Checked against git 2.54, these keys are in fact ignored outside the
+// repository's own config file, includes included, so this over-matches. That
+// only ever costs a fork, and it keeps the rule one sentence long.
+func affectsRepoLayout(key string) bool {
+	switch key {
+	case "core.bare", "core.worktree", "core.repositoryformatversion":
+		return true
+	}
+	return strings.HasPrefix(key, "extensions.")
+}
+
+// includeDirective reports whether key is an include directive, and returns the
+// includeIf condition it carries. An unconditional include.path yields an empty
+// condition.
+//
+// git honours exactly two spellings: include.path with no subsection, and
+// includeIf.<condition>.path, where the condition is everything up to the last
+// dot and must not be empty. [include "sub"] path is silently ignored, verified
+// against git 2.54.
+func includeDirective(key string) (cond string, ok bool) {
+	if key == "include.path" {
+		return "", true
+	}
+	rest, isConditional := strings.CutPrefix(key, "includeif.")
+	if !isConditional {
+		return "", false
+	}
+	dot := strings.LastIndexByte(rest, '.')
+	if dot <= 0 || rest[dot+1:] != "path" {
+		return "", false
+	}
+	return rest[:dot], true
+}
+
+// includeTarget resolves an include path the way git's handle_path_include
+// does: "~/" expands, and a relative path is taken against the directory of the
+// file carrying the directive. The second result is false when the target
+// cannot be named with certainty, which sends the caller to git.
+func (s *configScanner) includeTarget(value, from string) (string, bool) {
+	// A bare `path` key is fatal in git ("missing value for include.path"), and
+	// an implicit boolean is indistinguishable from `path = true` once parsed.
+	// Refuse both rather than resolve the wrong file.
+	if value == "" || value == "true" {
+		return "", false
+	}
+
+	p, ok := expandHome(value)
+	if !ok {
+		return "", false
+	}
+	switch {
+	case filepath.IsAbs(p):
+		return p, true
+	case os.IsPathSeparator(p[0]):
+		// Rooted but drive-less, which only happens on Windows. git resolves it
+		// against the current drive; this cannot, so it refuses.
+		return "", false
+	default:
+		return filepath.Join(filepath.Dir(from), p), true
+	}
+}
+
+// expandHome applies git's interpolate_path with real_home off: only "~/" is
+// expanded, and only from $HOME, which is the single source git itself reads.
+// "~other/" needs the password database and "%(prefix)/" needs git's
+// compiled-in install prefix, so both are refused.
+func expandHome(p string) (string, bool) {
+	if strings.HasPrefix(p, "%(prefix)/") {
+		return "", false
+	}
+	rest, isTilde := strings.CutPrefix(p, "~")
+	if !isTilde {
+		return p, true
+	}
+	if rest != "" && rest[0] != '/' {
+		return "", false
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		return "", false
+	}
+	return home + rest, true
+}
+
+// conditionMayHold reports whether an includeIf condition could be true.
+//
+// Only the plain gitdir: form is evaluated. gitdir/i: brings ASCII case folding
+// into the glob, onbranch: matches the checked-out branch and
+// hasconfig:remote.*.url: matches every configured remote URL; none is
+// reproduced here, so each reports "maybe", which costs nothing more than
+// reading the file it would include and judging that on its contents.
+//
+// An unrecognized condition is skipped outright because git treats it as false.
+func (s *configScanner) conditionMayHold(cond string) bool {
+	switch {
+	case strings.HasPrefix(cond, "gitdir:"):
+		return s.gitDirMayMatch(strings.TrimPrefix(cond, "gitdir:"))
+	case strings.HasPrefix(cond, "gitdir/i:"),
+		strings.HasPrefix(cond, "onbranch:"),
+		strings.HasPrefix(cond, "hasconfig:remote.*.url:"):
+		return true
+	default:
+		return false
+	}
+}
+
+// gitDirMayMatch evaluates a gitdir: condition against the repository's git
+// directory, mirroring git's include_by_gitdir over the subset it can reproduce
+// exactly: an absolute pattern with no wildcards. Anything else answers
+// "maybe".
+//
+// git matches the pattern with wildmatch(WM_PATHNAME) against the
+// symlink-resolved git directory, after appending "**" to a pattern that ends
+// in a separator. Without wildcards that reduces to a prefix test for a
+// directory pattern and an equality test otherwise. When the first comparison
+// fails git retries against a symlink-resolved pattern, which is the second
+// pass below; its realpath tolerates a missing final component and fails on
+// anything missing earlier, and a failed retry is a definite non-match.
+func (s *configScanner) gitDirMayMatch(pattern string) bool {
+	if filepath.Separator != '/' {
+		// git normalizes both sides to forward slashes on Windows and this does
+		// not, so the comparison would not be git's.
+		return true
+	}
+	if pattern == "" || strings.ContainsAny(pattern, `*?[]\`) {
+		return true
+	}
+
+	p, ok := s.expandRealHome(pattern)
+	if !ok || !strings.HasPrefix(p, "/") {
+		// A relative pattern gains a "**/" prefix and a "./" one is taken
+		// against the including file; neither is reproduced here.
+		return true
+	}
+	text, ok := s.realGitDir()
+	if !ok {
+		return true
+	}
+	if literalGitDirMatch(p, text) {
+		return true
+	}
+
+	resolved, err := filepath.EvalSymlinks(strings.TrimSuffix(p, "/"))
+	switch {
+	case err == nil:
+		if strings.HasSuffix(p, "/") {
+			resolved += "/"
+		}
+		return literalGitDirMatch(resolved, text)
+	case errors.Is(err, os.ErrNotExist):
+		// git's realpath fails the same way, leaving the condition false. A
+		// path that does not exist also cannot be the git directory, which does.
+		return false
+	default:
+		return true
+	}
+}
+
+// literalGitDirMatch applies the wildcard-free case of git's gitdir matching: a
+// pattern ending in a separator gains an implicit "**" and so matches anything
+// beneath it, while any other pattern must equal the git directory exactly.
+func literalGitDirMatch(pattern, gitDir string) bool {
+	if strings.HasSuffix(pattern, "/") {
+		return strings.HasPrefix(gitDir, pattern)
+	}
+	return gitDir == pattern
+}
+
+// realGitDir resolves the git directory's symlinks once per scan, which is the
+// text git compares a gitdir: pattern against.
+func (s *configScanner) realGitDir() (string, bool) {
+	if !s.resolved {
+		s.resolved = true
+		if real, err := filepath.EvalSymlinks(s.gitDir); err == nil {
+			s.gitDirReal = real
+		} else {
+			// git resolves it with die_on_error set, so it would abort here.
+			s.forced = true
+		}
+	}
+	return s.gitDirReal, s.gitDirReal != ""
+}
+
+// expandRealHome is expandHome for an includeIf condition, where git resolves
+// the home directory's symlinks before splicing it in.
+func (s *configScanner) expandRealHome(p string) (string, bool) {
+	expanded, ok := expandHome(p)
+	if !ok || !strings.HasPrefix(p, "~") {
+		return expanded, ok
+	}
+	home, err := filepath.EvalSymlinks(os.Getenv("HOME"))
+	if err != nil {
+		// git resolves it with die_on_error set, so it would abort here.
+		s.forced = true
+		return "", false
+	}
+	return home + strings.TrimPrefix(p, "~"), true
 }
 
 // readRepoContextFromDisk builds a repoContext by reading .git directly, with
@@ -853,7 +1146,7 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 
 	// The walk only vets the repository's shape. This is the second gate, on
 	// the configuration that could rewrite the URL out from under us.
-	if needsGitFallback(layout.gitDir, layout.commonDir) {
+	if needsGitFallback(layout.gitDir, layout.commonDir, remoteName) {
 		return repoContext{}, errors.New("configuration in scope can rewrite the remote URL")
 	}
 
