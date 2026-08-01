@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -850,4 +851,227 @@ func TestConfigBool(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- needsGitFallback ---
+
+// pinConfigScope isolates a test from the machine's real git configuration.
+// GIT_CONFIG_NOSYSTEM is deliberately left unset so that the system scope is
+// still exercised, pinned to an empty file through GIT_CONFIG_SYSTEM.
+func pinConfigScope(t *testing.T) {
+	t.Helper()
+	empty := filepath.Join(t.TempDir(), "empty-gitconfig")
+	writeFile(t, empty, "")
+	t.Setenv("GIT_CONFIG_GLOBAL", empty)
+	t.Setenv("GIT_CONFIG_SYSTEM", empty)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "")
+	t.Setenv("GIT_CONFIG_COUNT", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("USERPROFILE", t.TempDir()) // os.UserHomeDir on Windows
+	for _, name := range gitDiscoveryEnvVars {
+		t.Setenv(name, "")
+	}
+}
+
+// writeConfig creates a config file in a fresh dir and returns its path.
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config")
+	writeFile(t, p, content)
+	return p
+}
+
+// localScope builds a directory holding an innocuous local config and returns
+// it, standing in for both the gitDir and the commonDir of a plain repository.
+func localScope(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config"), content)
+	return dir
+}
+
+const cleanConfig = "[remote \"origin\"]\n\turl = https://example.com/r.git\n"
+
+func TestNeedsGitFallback(t *testing.T) {
+	t.Run("clean scope does not need the fallback", func(t *testing.T) {
+		pinConfigScope(t)
+		dir := localScope(t, cleanConfig)
+		if needsGitFallback(dir, dir) {
+			t.Error("needsGitFallback() = true, want false for a clean scope")
+		}
+	})
+
+	t.Run("a missing config file is not a reason to fall back", func(t *testing.T) {
+		pinConfigScope(t)
+		dir := t.TempDir()
+		if needsGitFallback(dir, dir) {
+			t.Error("needsGitFallback() = true, want false when files are simply absent")
+		}
+	})
+
+	// Every discovery variable already disqualifies the walk; needsGitFallback
+	// asks the same helper so the two cannot drift apart.
+	t.Run("discovery environment variables force the fallback", func(t *testing.T) {
+		for _, name := range gitDiscoveryEnvVars {
+			t.Run(name, func(t *testing.T) {
+				pinConfigScope(t)
+				dir := localScope(t, cleanConfig)
+				t.Setenv(name, "/somewhere")
+				if !needsGitFallback(dir, dir) {
+					t.Errorf("needsGitFallback() = false, want true when %s is set", name)
+				}
+			})
+		}
+	})
+
+	t.Run("GIT_CONFIG_COUNT forces the fallback", func(t *testing.T) {
+		pinConfigScope(t)
+		dir := localScope(t, cleanConfig)
+		t.Setenv("GIT_CONFIG_COUNT", "1")
+		if !needsGitFallback(dir, dir) {
+			t.Error("needsGitFallback() = false, want true when config comes from the environment")
+		}
+	})
+
+	markers := []struct{ name, content string }{
+		{"insteadOf", "[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"},
+		{"uppercase INSTEADOF", "[url \"x\"]\n\tINSTEADOF = y\n"},
+		{"pushInsteadOf", "[url \"x\"]\n\tpushInsteadOf = y\n"},
+		{"include", "[include]\n\tpath = /other/config\n"},
+		{"includeIf", "[includeIf \"gitdir:~/work/\"]\n\tpath = ~/work/.gitconfig\n"},
+	}
+
+	for _, m := range markers {
+		t.Run(m.name+" in the global config forces the fallback", func(t *testing.T) {
+			pinConfigScope(t)
+			t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t, m.content))
+			dir := localScope(t, cleanConfig)
+			if !needsGitFallback(dir, dir) {
+				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
+			}
+		})
+
+		t.Run(m.name+" in the system config forces the fallback", func(t *testing.T) {
+			pinConfigScope(t)
+			t.Setenv("GIT_CONFIG_SYSTEM", writeConfig(t, m.content))
+			dir := localScope(t, cleanConfig)
+			if !needsGitFallback(dir, dir) {
+				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
+			}
+		})
+
+		t.Run(m.name+" in the local config forces the fallback", func(t *testing.T) {
+			pinConfigScope(t)
+			dir := localScope(t, m.content)
+			if !needsGitFallback(dir, dir) {
+				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
+			}
+		})
+	}
+
+	// The per-worktree file is read whenever extensions.worktreeConfig is on,
+	// and it can carry an insteadOf like any other config file.
+	t.Run("insteadOf in config.worktree forces the fallback", func(t *testing.T) {
+		for _, where := range []string{"gitDir", "commonDir"} {
+			t.Run(where, func(t *testing.T) {
+				pinConfigScope(t)
+				gitDir := localScope(t, cleanConfig)
+				commonDir := localScope(t, cleanConfig)
+				target := gitDir
+				if where == "commonDir" {
+					target = commonDir
+				}
+				writeFile(t, filepath.Join(target, "config.worktree"), "[url \"a\"]\n\tinsteadOf = b\n")
+				if !needsGitFallback(gitDir, commonDir) {
+					t.Error("needsGitFallback() = false, want true for an insteadOf in config.worktree")
+				}
+			})
+		}
+	})
+
+	t.Run("GIT_CONFIG_NOSYSTEM only suppresses the system scope when true", func(t *testing.T) {
+		for _, tc := range []struct {
+			value string
+			want  bool
+		}{
+			{"1", false}, {"true", false}, {"yes", false},
+			{"0", true}, {"false", true}, {"", true},
+			{"garbage", true}, // uninterpretable: read the file rather than skip it
+		} {
+			t.Run("value="+tc.value, func(t *testing.T) {
+				pinConfigScope(t)
+				t.Setenv("GIT_CONFIG_SYSTEM", writeConfig(t, "[url \"a\"]\n\tinsteadOf = b\n"))
+				t.Setenv("GIT_CONFIG_NOSYSTEM", tc.value)
+				dir := localScope(t, cleanConfig)
+				if got := needsGitFallback(dir, dir); got != tc.want {
+					t.Errorf("needsGitFallback() = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	// git reads ~/.config/git/config when XDG_CONFIG_HOME is unset. Missing
+	// that fallback would let an insteadOf there produce a wrong URL silently.
+	t.Run("the XDG default location is scanned", func(t *testing.T) {
+		pinConfigScope(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("GIT_CONFIG_GLOBAL", "")
+		mkdirAll(t, filepath.Join(home, ".config", "git"))
+		writeFile(t, filepath.Join(home, ".config", "git", "config"), "[url \"a\"]\n\tinsteadOf = b\n")
+
+		dir := localScope(t, cleanConfig)
+		if !needsGitFallback(dir, dir) {
+			t.Error("needsGitFallback() = false, want true for an insteadOf in ~/.config/git/config")
+		}
+	})
+
+	t.Run("~/.gitconfig is scanned", func(t *testing.T) {
+		pinConfigScope(t)
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home)
+		t.Setenv("GIT_CONFIG_GLOBAL", "")
+		writeFile(t, filepath.Join(home, ".gitconfig"), "[url \"a\"]\n\tinsteadOf = b\n")
+
+		dir := localScope(t, cleanConfig)
+		if !needsGitFallback(dir, dir) {
+			t.Error("needsGitFallback() = false, want true for an insteadOf in ~/.gitconfig")
+		}
+	})
+}
+
+// TestSystemConfigPaths_CoversTheRealOne guards the one guess in
+// configScopePaths that cannot be derived from the environment: git's
+// compiled-in ETC_GITCONFIG. Homebrew puts it under the install prefix rather
+// than in /etc, so a hardcoded /etc/gitconfig would silently miss it.
+func TestSystemConfigPaths_CoversTheRealOne(t *testing.T) {
+	out, err := exec.Command("git", "config", "--list", "--show-origin", "--system").Output()
+	if err != nil {
+		t.Skip("no system git config on this machine")
+	}
+	line, _, _ := strings.Cut(string(out), "\n")
+	origin, _, ok := strings.Cut(line, "\t")
+	if !ok {
+		t.Skipf("unexpected --show-origin output: %q", line)
+	}
+	want := strings.TrimPrefix(origin, "file:")
+
+	// Compare symlink-resolved where possible; a candidate that does not exist
+	// simply cannot be the match.
+	resolve := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return p
+	}
+	for _, p := range systemConfigPaths() {
+		if p == want || resolve(p) == resolve(want) {
+			return
+		}
+	}
+	t.Errorf("systemConfigPaths() = %v, none of which is git's real system config %q", systemConfigPaths(), want)
 }

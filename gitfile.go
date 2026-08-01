@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -297,6 +299,19 @@ var gitDiscoveryEnvVars = []string{
 	"GIT_CEILING_DIRECTORIES",
 }
 
+// gitDiscoveryEnvOverride returns the name of the first variable from
+// gitDiscoveryEnvVars that is set, or "" when none is. It is the single home
+// for that check: both the walk and needsGitFallback ask it rather than each
+// testing its own subset.
+func gitDiscoveryEnvOverride() string {
+	for _, name := range gitDiscoveryEnvVars {
+		if os.Getenv(name) != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 // safeRepoExtensions lists the extensions.* keys that cannot change how the
 // branch, the remote URL or the work tree are resolved. Anything else — most
 // importantly extensions.refstorage=reftable, where .git/HEAD is the decoy
@@ -330,10 +345,8 @@ var safeRepoExtensions = map[string]bool{
 // st_dev is not portable through the standard library. It only matters when a
 // mount point sits between the target and the repository root.
 func discoverGitDir(start string) (gitDir, commonDir, workTree string, err error) {
-	for _, name := range gitDiscoveryEnvVars {
-		if os.Getenv(name) != "" {
-			return "", "", "", fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
-		}
+	if name := gitDiscoveryEnvOverride(); name != "" {
+		return "", "", "", fmt.Errorf("%s is set, cannot reproduce git's repository discovery", name)
 	}
 
 	dir, err := filepath.Abs(start)
@@ -688,4 +701,120 @@ func configBool(value string) (result, known bool) {
 		return false, true
 	}
 	return false, false
+}
+
+// fallbackMarkers are config directives the fast path does not implement.
+// Their mere presence anywhere in scope sends the whole lookup to git, because
+// any of them can change the remote URL that would otherwise be reported.
+//
+// "insteadof" also catches pushInsteadOf, and "[include" also catches
+// "[include \"x\"]". Both over-match, which costs at most one fork.
+var fallbackMarkers = []string{"insteadof", "[include", "includeif"}
+
+// needsGitFallback reports whether the pure-Go path must defer to the git
+// binary. It is deliberately conservative: a false positive costs one fork, a
+// false negative costs a wrong URL.
+//
+// The scan is a raw lowercase substring match, not a parse. A config file that
+// merely mentions one of the markers in a comment or a remote URL loses the
+// fast path, which is the cheap side of the trade.
+func needsGitFallback(gitDir, commonDir string) bool {
+	if gitDiscoveryEnvOverride() != "" {
+		return true
+	}
+	// GIT_CONFIG_COUNT/KEY/VALUE inject config straight from the environment,
+	// including url.*.insteadOf, and no file scan can see it.
+	if os.Getenv("GIT_CONFIG_COUNT") != "" {
+		return true
+	}
+	return slices.ContainsFunc(configScopePaths(gitDir, commonDir), fileContainsMarker)
+}
+
+// configScopePaths lists the config files git would consult, in scope order.
+// Paths that do not exist are harmless; they simply contribute nothing.
+//
+// Known and accepted gap: the system config path is compiled into the git
+// binary (ETC_GITCONFIG), so it can only be guessed. systemConfigPaths covers
+// the standard location and the one implied by where git sits on PATH, which
+// together cover Homebrew, the usual Linux packages and Git for Windows. A git
+// built with an unusual prefix would have its system config missed.
+func configScopePaths(gitDir, commonDir string) []string {
+	var paths []string
+
+	// git_env_bool: only a true-ish value suppresses the system config, and an
+	// uninterpretable one is treated as "read it", which is the safe side here.
+	if on, known := configBool(os.Getenv("GIT_CONFIG_NOSYSTEM")); !on || !known {
+		if p := os.Getenv("GIT_CONFIG_SYSTEM"); p != "" {
+			paths = append(paths, p)
+		} else {
+			paths = append(paths, systemConfigPaths()...)
+		}
+	}
+
+	if p := os.Getenv("GIT_CONFIG_GLOBAL"); p != "" {
+		paths = append(paths, p)
+	} else {
+		// git reads both the XDG file and ~/.gitconfig, and falls back to
+		// ~/.config/git/config when XDG_CONFIG_HOME is unset.
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			paths = append(paths, filepath.Join(xdg, "git", "config"))
+		} else if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".config", "git", "config"))
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(home, ".gitconfig"))
+		}
+	}
+
+	if commonDir != "" {
+		paths = append(paths, filepath.Join(commonDir, "config"))
+	}
+	// The per-worktree file is read whenever extensions.worktreeConfig is on.
+	// Scanning it unconditionally is cheaper than deciding whether it applies,
+	// and a stale file that git ignores can only cost a fork.
+	if gitDir != "" {
+		paths = append(paths, filepath.Join(gitDir, "config.worktree"))
+	}
+	if commonDir != "" && commonDir != gitDir {
+		paths = append(paths, filepath.Join(commonDir, "config.worktree"))
+	}
+	return paths
+}
+
+// systemConfigPaths guesses where git's system-wide config lives.
+func systemConfigPaths() []string {
+	paths := []string{filepath.Join("/etc", "gitconfig")}
+
+	// A prefixed install keeps it next to the binary: /opt/homebrew/bin/git
+	// implies /opt/homebrew/etc/gitconfig, C:\Program Files\Git\cmd\git.exe
+	// implies C:\Program Files\Git\etc\gitconfig.
+	if bin, err := exec.LookPath("git"); err == nil {
+		if abs, err := filepath.Abs(bin); err == nil {
+			prefix := filepath.Dir(filepath.Dir(abs))
+			paths = append(paths, filepath.Join(prefix, "etc", "gitconfig"))
+			paths = append(paths, filepath.Join(prefix, "mingw64", "etc", "gitconfig"))
+		}
+	}
+	// Git for Windows also honours a machine-wide file under ProgramData.
+	if pd := os.Getenv("ProgramData"); pd != "" {
+		paths = append(paths, filepath.Join(pd, "Git", "config"))
+	}
+	return paths
+}
+
+// fileContainsMarker reports whether path holds any fallback marker. An absent
+// file is not a marker. An unreadable one is: git may well be able to read what
+// this process cannot, and its contents could change the URL.
+func fileContainsMarker(path string) bool {
+	raw, err := os.ReadFile(path) // #nosec G304 -- paths come from git's own config scopes
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	lower := strings.ToLower(string(raw))
+	for _, m := range fallbackMarkers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+	return false
 }
