@@ -30,3 +30,6 @@ dist/
 
 # Desloppify
 .desloppify/
+
+# Superpowers scratch (briefs, review reports, diffs)
+.superpowers/
