@@ -8,6 +8,7 @@ before:
 builds:
   - id: gopen
     binary: gopen
+    main: .
     env:
       - CGO_ENABLED=0
     goos:
@@ -32,6 +33,9 @@ builds:
 
 kos:
   - id: gopen
+    # Go 1.27 rejects `go list ""` ("invalid package"), which ko does when this
+    # is left to default off the build. Must stay explicit.
+    main: .
     repositories:
       - ghcr.io/pixibixi/gopen
     base_image: gcr.io/distroless/static
