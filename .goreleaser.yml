@@ -100,15 +100,27 @@ release:
   prerelease: auto
   mode: replace
 
-brews:
+# Casks, not formulae: goreleaser hard-deprecated `brews`, and a formula is meant
+# to build from source while this tap ships prebuilt binaries. Cask is macOS-only.
+homebrew_casks:
   - name: gopen
     repository:
       owner: PixiBixi
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    directory: Formula
-    homepage: "https://github.com/{{ .Env.GITHUB_REPOSITORY_OWNER }}/gopen"
+    directory: Casks
+    homepage: "https://github.com/PixiBixi/gopen"
     description: "Open your git repository in the browser at the current branch and directory"
     license: "MIT"
-    install: |
-      bin.install "gopen"
+    binaries: [gopen]
+    url:
+      verified: github.com/PixiBixi/gopen/
+    # Brew quarantines cask payloads and these binaries are unsigned, so without
+    # this Gatekeeper blocks them. Formulae were never quarantined, so the hook
+    # only preserves the behaviour users already had. Drop it once notarised.
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/gopen"]
+          end

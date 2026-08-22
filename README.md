@@ -34,12 +34,14 @@ make build
 sudo mv gopen /usr/local/bin/
 ```
 
-### Homebrew (macOS/Linux)
+### Homebrew (macOS)
 
 ```bash
-# Once published to a homebrew tap
 brew install pixibixi/tap/gopen
 ```
+
+The tap ships a cask, which Homebrew only supports on macOS. On Linux, use the
+pre-built binary, `go install`, or the container image below.
 
 ### Download pre-built binary
 
