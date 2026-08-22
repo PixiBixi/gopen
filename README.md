@@ -266,7 +266,8 @@ Two known gaps are documented in the source and fall outside that guarantee: the
 ## Requirements
 
 - Git installed and in PATH
-- Go 1.21+ (for building from source)
+- Go 1.27+ (for building from source)
+- **macOS**: 13 Ventura or later — Go 1.27 dropped support for earlier releases
 - **Linux clipboard feature**: `wl-copy` (Wayland), `xclip`, or `xsel`
 
 ## Development
