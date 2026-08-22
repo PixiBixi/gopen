@@ -1071,11 +1071,11 @@ func includeDirective(key string) (cond string, ok bool) {
 	if !isConditional {
 		return "", false
 	}
-	dot := strings.LastIndexByte(rest, '.')
-	if dot <= 0 || rest[dot+1:] != "path" {
+	cond, name, ok := strings.CutLast(rest, ".")
+	if !ok || cond == "" || name != "path" {
 		return "", false
 	}
-	return rest[:dot], true
+	return cond, true
 }
 
 // includeTarget resolves an include path the way git's handle_path_include
