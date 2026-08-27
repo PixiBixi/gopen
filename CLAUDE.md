@@ -14,7 +14,7 @@ Module: `github.com/PixiBixi/gopen` | Go 1.27 | No external deps (stdlib only)
 # Build
 make build           # binary: ./gopen
 make build-all       # cross-compile all platforms (plain go build, NOT GoReleaser)
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o gopen .  # correct since code is split across multiple files
+CGO_ENABLED=0 go build -trimpath -ldflags="-s" -o gopen .  # correct since code is split across multiple files
 go build -v ./...
 
 # Test & lint

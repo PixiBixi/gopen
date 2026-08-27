@@ -1,6 +1,6 @@
 .PHONY: build install clean
 
-LDFLAGS := -s -w
+LDFLAGS := -s
 BUILD_FLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
 # Build for current platform
