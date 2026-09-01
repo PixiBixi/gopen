@@ -6,15 +6,16 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
-  packages: write
-  id-token: write      # keyless identity used to sign the provenance attestation
-  attestations: write  # store the attestation on the repo
+permissions: {}
 
 jobs:
   goreleaser:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+      id-token: write      # keyless identity used to sign the provenance attestation
+      attestations: write  # store the attestation on the repo
     steps:
       # audit, not block: this job's egress (goreleaser uploads, the
       # sigstore endpoints behind the attestation) moves with every
