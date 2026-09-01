@@ -14,6 +14,10 @@ jobs:
     name: Test
     runs-on: ubuntu-24.04
     steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -40,6 +44,12 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-26, windows-2025]
     steps:
+      - name: Harden the runner
+        # eBPF monitoring is Ubuntu-only; the macOS and Windows legs skip it.
+        if: runner.os == 'Linux'
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
