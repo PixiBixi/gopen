@@ -355,3 +355,77 @@ func TestBuildWebURL(t *testing.T) {
 		})
 	}
 }
+
+// A branch name or a file path accepts characters that git allows but a URL or
+// a command interpreter does not. Every one of these must leave buildWebURL
+// percent-encoded, and the slashes that structure the URL must survive.
+func TestBuildWebURLEscaping(t *testing.T) {
+	tests := []struct {
+		name       string
+		ctx        repoContext
+		lineNumber string
+		commitHash string
+		want       string
+	}{
+		{
+			name: "ampersand in branch is encoded",
+			ctx:  repoContext{baseURL: "https://github.com/user/repo", branch: "main&calc"},
+			want: "https://github.com/user/repo/tree/main%26calc",
+		},
+		{
+			name: "pipe in branch is encoded",
+			ctx:  repoContext{baseURL: "https://github.com/user/repo", branch: "main|calc"},
+			want: "https://github.com/user/repo/tree/main%7Ccalc",
+		},
+		{
+			name: "fragment in branch is encoded",
+			ctx:  repoContext{baseURL: "https://github.com/user/repo", branch: "main#frag"},
+			want: "https://github.com/user/repo/tree/main%23frag",
+		},
+		{
+			name: "slashes in a ref stay separators",
+			ctx:  repoContext{baseURL: "https://github.com/user/repo", branch: "feat/nested/x"},
+			want: "https://github.com/user/repo/tree/feat/nested/x",
+		},
+		{
+			name: "space and ampersand in a path are encoded",
+			ctx:  repoContext{baseURL: "https://github.com/user/repo", branch: "main", relPath: "dir a/f&g.go"},
+			want: "https://github.com/user/repo/tree/main/dir%20a/f%26g.go",
+		},
+		{
+			name: "baseURL scheme and host are left alone",
+			ctx:  repoContext{baseURL: "https://git.example.com:8443/user/repo", branch: "main"},
+			want: "https://git.example.com:8443/user/repo/tree/main",
+		},
+		{
+			name:       "commit hash is encoded",
+			ctx:        repoContext{baseURL: "https://github.com/user/repo", branch: "main"},
+			commitHash: "abc123&calc",
+			want:       "https://github.com/user/repo/commit/abc123%26calc",
+		},
+		{
+			name:       "line number is encoded",
+			ctx:        repoContext{baseURL: "https://github.com/user/repo", branch: "main", relPath: "main.go"},
+			lineNumber: "42&calc",
+			want:       "https://github.com/user/repo/tree/main/main.go#L42%26calc",
+		},
+		{
+			name: "gitlab ref is encoded",
+			ctx:  repoContext{baseURL: "https://gitlab.com/user/repo", branch: "main&calc"},
+			want: "https://gitlab.com/user/repo/-/tree/main%26calc",
+		},
+		{
+			name: "azure devops query ref is encoded",
+			ctx:  repoContext{baseURL: "https://dev.azure.com/org/proj/_git/repo", branch: "main&calc"},
+			want: "https://dev.azure.com/org/proj/_git/repo?version=GBmain%26calc",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := buildWebURL(tt.ctx, tt.lineNumber, tt.commitHash); got != tt.want {
+				t.Errorf("buildWebURL()\n  got  %q\n  want %q", got, tt.want)
+			}
+		})
+	}
+}
