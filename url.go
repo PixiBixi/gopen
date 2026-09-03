@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 )
@@ -23,6 +24,25 @@ func pathJoin(parts ...string) string {
 		}
 	}
 	return strings.Join(segments, "/")
+}
+
+// escapeURLPath percent-encodes every slash-separated component of p and keeps
+// the separators: a ref like "feat/x" and a nested file path both need real
+// slashes once they land in the URL.
+func escapeURLPath(p string) string {
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		parts[i] = escapeURLSegment(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+// escapeURLSegment percent-encodes one component. url.PathEscape is NOT enough:
+// it leaves the sub-delimiters &, $ and = raw, and a raw & from a git-legal
+// branch name both truncates the URL and separates commands in
+// `cmd /c start <url>` on Windows. Do NOT swap this back to PathEscape.
+func escapeURLSegment(s string) string {
+	return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
 
 // Line anchor helpers — return a fragment or query suffix for line highlighting.
@@ -200,22 +220,27 @@ func buildWebURL(ctx repoContext, lineNumber, commitHash string) string {
 	var startLine, endLine string
 	if lineNumber != "" {
 		parts := strings.SplitN(lineNumber, "-", 2)
-		startLine = parts[0]
+		startLine = escapeURLSegment(parts[0])
 		if len(parts) > 1 {
-			endLine = parts[1]
+			endLine = escapeURLSegment(parts[1])
 		}
 	}
 
 	p := detectProvider(ctx.baseURL)
 
-	var url string
+	// Only the ref, the path and the hash are encoded. baseURL carries the
+	// scheme and the host, which percent-encoding would destroy.
+	ref := escapeURLPath(ctx.branch)
+	relPath := escapeURLPath(ctx.relPath)
+
+	var webURL string
 	if commitHash != "" {
-		url = p.commitURL(ctx.baseURL, commitHash, ctx.relPath)
+		webURL = p.commitURL(ctx.baseURL, escapeURLSegment(commitHash), relPath)
 	} else {
-		url = p.treeURL(ctx.baseURL, ctx.branch, ctx.relPath)
+		webURL = p.treeURL(ctx.baseURL, ref, relPath)
 	}
 
-	return url + p.lineAnchor(startLine, endLine)
+	return webURL + p.lineAnchor(startLine, endLine)
 }
 
 func convertToHTTPS(url string) string {
