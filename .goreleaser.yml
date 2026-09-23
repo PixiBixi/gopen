@@ -136,8 +136,6 @@ homebrew_casks:
     description: "Open your git repository in the browser at the current branch and directory"
     license: "MIT"
     binaries: [gopen]
-    url:
-      verified: github.com/PixiBixi/gopen/
     # Brew quarantines cask payloads and these binaries are unsigned, so without
     # this Gatekeeper blocks them. Formulae were never quarantined, so the hook
     # only preserves the behaviour users already had. Drop it once notarised.
