@@ -139,9 +139,11 @@ homebrew_casks:
     # Brew quarantines cask payloads and these binaries are unsigned, so without
     # this Gatekeeper blocks them. Formulae were never quarantined, so the hook
     # only preserves the behaviour users already had. Drop it once notarised.
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/gopen"]
-          end
+    # custom_block, not hooks.post.install: GoReleaser renders hooks as `postflight do`,
+    # which Homebrew deprecated in favour of the declarative `postflight_steps`.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{ "{{staged_path}}" }}/gopen"]
+        end
+      end
