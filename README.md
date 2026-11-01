@@ -261,7 +261,7 @@ https://github.com/user/repo.git          → https://github.com/user/repo
 
 ## How it works
 
-gopen reads `.git` directly (config, `HEAD`, worktree layout) instead of shelling out to `git`, which makes most runs faster. It falls back to invoking the `git` binary whenever it cannot be certain — a config include or `insteadOf` rewrite it would have to resolve, a worktree config, custom ref storage, a symlinked `HEAD`, and similar. The fast path is designed to refuse rather than guess: erring towards a fallback costs a few milliseconds, whereas answering differently from `git` would send you to the wrong page.
+gopen reads `.git` directly (config, `HEAD`, worktree layout) instead of shelling out to `git`, which makes most runs faster. It falls back to invoking the `git` binary whenever it cannot be certain: a config include it cannot resolve, an `insteadOf` rewrite whose prefix matches the remote URL, a worktree config, custom ref storage, a symlinked `HEAD`, and similar. The fast path is designed to refuse rather than guess: erring towards a fallback costs a few milliseconds, whereas answering differently from `git` would send you to the wrong page.
 
 Two known gaps are documented in the source and fall outside that guarantee: the system-wide config path is compiled into the `git` binary and can only be guessed (the standard locations and the one implied by `git` on `PATH` are covered), and the discovery walk does not stop at a filesystem boundary the way `git` does without `GIT_DISCOVERY_ACROSS_FILESYSTEM`.
 
