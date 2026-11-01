@@ -816,7 +816,10 @@ func configBool(value string) (result, known bool) {
 // read and follows its include directives, so that an include only disqualifies
 // the fast path when the file it pulls in really does define something the
 // answer depends on.
-func needsGitFallback(gitDir, commonDir, remoteName string) bool {
+//
+// remoteURL is the remote's first configured url, the one the fast path would
+// report; an insteadOf whose prefix it does not start with cannot change it.
+func needsGitFallback(gitDir, commonDir, remoteName, remoteURL string) bool {
 	if gitDiscoveryEnvOverride() != "" {
 		return true
 	}
@@ -831,7 +834,7 @@ func needsGitFallback(gitDir, commonDir, remoteName string) bool {
 		}
 	}
 
-	s := configScanner{gitDir: gitDir, remoteURLKey: "remote." + remoteName + ".url"}
+	s := configScanner{gitDir: gitDir, remoteURLKey: "remote." + remoteName + ".url", remoteURL: remoteURL}
 	for _, p := range outerConfigScopePaths() {
 		if s.scanFile(p, false, 0) {
 			return true
@@ -970,6 +973,7 @@ const (
 type configScanner struct {
 	gitDir       string // the repository's git directory, for gitdir: conditions
 	remoteURLKey string // remote.<name>.url, the one key the fast path reads
+	remoteURL    string // its value; "" means unknown, so any URL rewrite disqualifies
 
 	gitDirReal string // symlink-resolved gitDir, computed on first use
 	resolved   bool   // whether gitDirReal has been computed
@@ -997,7 +1001,7 @@ func (s *configScanner) scanFile(path string, own bool, depth int) bool {
 	}
 
 	for _, e := range entries {
-		if rewritesRemoteURL(e.key) {
+		if rewritesRemoteURL(e.key) && s.rewriteMayApply(e.value) {
 			return true
 		}
 		if !own && (e.key == s.remoteURLKey || affectsRepoLayout(e.key)) {
@@ -1038,6 +1042,14 @@ func (s *configScanner) scanFile(path string, own bool, depth int) bool {
 func rewritesRemoteURL(key string) bool {
 	return strings.HasPrefix(key, "url.") &&
 		(strings.HasSuffix(key, ".insteadof") || strings.HasSuffix(key, ".pushinsteadof"))
+}
+
+// rewriteMayApply reports whether an insteadOf or pushInsteadOf value could
+// rewrite the remote URL. git rewrites a URL only when it starts with the value,
+// so a rule for another host must not cost the fast path. An empty value
+// prefixes everything and an unknown URL matches anything: both fall back.
+func (s *configScanner) rewriteMayApply(value string) bool {
+	return s.remoteURL == "" || strings.HasPrefix(s.remoteURL, value)
 }
 
 // affectsRepoLayout reports whether key could move the work tree or change how
@@ -1261,9 +1273,16 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 		return repoContext{}, err
 	}
 
+	// firstConfigValue, not lastConfigValue: `git remote get-url` returns a
+	// remote's *first* url line.
+	remoteURL, ok := firstConfigValue(layout.config, "remote."+remoteName+".url")
+	if !ok {
+		return repoContext{}, fmt.Errorf("no URL configured for remote %q", remoteName)
+	}
+
 	// The walk only vets the repository's shape. This is the second gate, on
 	// the configuration that could rewrite the URL out from under us.
-	if needsGitFallback(layout.gitDir, layout.commonDir, remoteName) {
+	if needsGitFallback(layout.gitDir, layout.commonDir, remoteName, remoteURL) {
 		return repoContext{}, errors.New("configuration in scope can rewrite the remote URL")
 	}
 
@@ -1282,13 +1301,6 @@ func readRepoContextFromDisk(targetPath, remoteName string) (repoContext, error)
 	// before the fast path existed.
 	if branch != detachedHEAD && !branchIsBorn(layout.commonDir, branch) {
 		return repoContext{}, fmt.Errorf("branch %q has no commit yet", branch)
-	}
-
-	// firstConfigValue, not lastConfigValue: `git remote get-url` returns a
-	// remote's *first* url line.
-	remoteURL, ok := firstConfigValue(layout.config, "remote."+remoteName+".url")
-	if !ok {
-		return repoContext{}, fmt.Errorf("no URL configured for remote %q", remoteName)
 	}
 
 	relPath, err := relativeToRoot(layout.workTree, target)

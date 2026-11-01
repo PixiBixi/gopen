@@ -1037,7 +1037,7 @@ func TestNeedsGitFallback(t *testing.T) {
 	t.Run("clean scope does not need the fallback", func(t *testing.T) {
 		pinConfigScope(t)
 		dir := localScope(t, cleanConfig)
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false for a clean scope")
 		}
 	})
@@ -1045,7 +1045,7 @@ func TestNeedsGitFallback(t *testing.T) {
 	t.Run("a missing config file is not a reason to fall back", func(t *testing.T) {
 		pinConfigScope(t)
 		dir := t.TempDir()
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false when files are simply absent")
 		}
 	})
@@ -1058,7 +1058,7 @@ func TestNeedsGitFallback(t *testing.T) {
 				pinConfigScope(t)
 				dir := localScope(t, cleanConfig)
 				t.Setenv(name, "/somewhere")
-				if !needsGitFallback(dir, dir, "origin") {
+				if !needsGitFallback(dir, dir, "origin", "") {
 					t.Errorf("needsGitFallback() = false, want true when %s is set", name)
 				}
 			})
@@ -1069,7 +1069,7 @@ func TestNeedsGitFallback(t *testing.T) {
 		pinConfigScope(t)
 		dir := localScope(t, cleanConfig)
 		t.Setenv("GIT_CONFIG_COUNT", "1")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true when config comes from the environment")
 		}
 	})
@@ -1085,7 +1085,7 @@ func TestNeedsGitFallback(t *testing.T) {
 			pinConfigScope(t)
 			t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t, m.content))
 			dir := localScope(t, cleanConfig)
-			if !needsGitFallback(dir, dir, "origin") {
+			if !needsGitFallback(dir, dir, "origin", "") {
 				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
 			}
 		})
@@ -1094,7 +1094,7 @@ func TestNeedsGitFallback(t *testing.T) {
 			pinConfigScope(t)
 			t.Setenv("GIT_CONFIG_SYSTEM", writeConfig(t, m.content))
 			dir := localScope(t, cleanConfig)
-			if !needsGitFallback(dir, dir, "origin") {
+			if !needsGitFallback(dir, dir, "origin", "") {
 				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
 			}
 		})
@@ -1102,8 +1102,32 @@ func TestNeedsGitFallback(t *testing.T) {
 		t.Run(m.name+" in the local config forces the fallback", func(t *testing.T) {
 			pinConfigScope(t)
 			dir := localScope(t, m.content)
-			if !needsGitFallback(dir, dir, "origin") {
+			if !needsGitFallback(dir, dir, "origin", "") {
 				t.Errorf("needsGitFallback() = false, want true for %s", m.name)
+			}
+		})
+	}
+
+	// With the remote URL known, only a rewrite whose prefix it starts with
+	// can change the answer.
+	rewrites := []struct {
+		name, content string
+		want          bool
+	}{
+		{"matching insteadOf", "[url \"x\"]\n\tinsteadOf = https://example.com/\n", true},
+		{"matching pushInsteadOf", "[url \"x\"]\n\tpushInsteadOf = https://example.com/\n", true},
+		{"empty insteadOf prefixes everything", "[url \"x\"]\n\tinsteadOf =\n", true},
+		{"insteadOf for another host", "[url \"x\"]\n\tinsteadOf = git@gitlab.com:team/\n", false},
+		{"insteadOf longer than the URL", "[url \"x\"]\n\tinsteadOf = https://example.com/r.git/more\n", false},
+		{"insteadOf differing only in case", "[url \"x\"]\n\tinsteadOf = HTTPS://EXAMPLE.COM/\n", false},
+	}
+	for _, tc := range rewrites {
+		t.Run(tc.name+" with a known remote URL", func(t *testing.T) {
+			pinConfigScope(t)
+			t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t, tc.content))
+			dir := localScope(t, cleanConfig)
+			if got := needsGitFallback(dir, dir, "origin", "https://example.com/r.git"); got != tc.want {
+				t.Errorf("needsGitFallback() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -1116,7 +1140,7 @@ func TestNeedsGitFallback(t *testing.T) {
 		pinConfigScope(t)
 		t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t, "[remote \"origin\"]\n\turl = https://global/g.git\n"))
 		dir := localScope(t, cleanConfig)
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true for a global remote.origin.url")
 		}
 	})
@@ -1125,7 +1149,7 @@ func TestNeedsGitFallback(t *testing.T) {
 		pinConfigScope(t)
 		t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t, "[remote \"other\"]\n\turl = https://global/g.git\n"))
 		dir := localScope(t, cleanConfig)
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false for an unrelated remote")
 		}
 	})
@@ -1143,7 +1167,7 @@ func TestNeedsGitFallback(t *testing.T) {
 					target = commonDir
 				}
 				writeFile(t, filepath.Join(target, "config.worktree"), "[url \"a\"]\n\tinsteadOf = b\n")
-				if !needsGitFallback(gitDir, commonDir, "origin") {
+				if !needsGitFallback(gitDir, commonDir, "origin", "") {
 					t.Error("needsGitFallback() = false, want true for an insteadOf in config.worktree")
 				}
 			})
@@ -1164,7 +1188,7 @@ func TestNeedsGitFallback(t *testing.T) {
 				t.Setenv("GIT_CONFIG_SYSTEM", writeConfig(t, "[url \"a\"]\n\tinsteadOf = b\n"))
 				t.Setenv("GIT_CONFIG_NOSYSTEM", tc.value)
 				dir := localScope(t, cleanConfig)
-				if got := needsGitFallback(dir, dir, "origin"); got != tc.want {
+				if got := needsGitFallback(dir, dir, "origin", ""); got != tc.want {
 					t.Errorf("needsGitFallback() = %v, want %v", got, tc.want)
 				}
 			})
@@ -1184,7 +1208,7 @@ func TestNeedsGitFallback(t *testing.T) {
 		writeFile(t, filepath.Join(home, ".config", "git", "config"), "[url \"a\"]\n\tinsteadOf = b\n")
 
 		dir := localScope(t, cleanConfig)
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true for an insteadOf in ~/.config/git/config")
 		}
 	})
@@ -1198,7 +1222,7 @@ func TestNeedsGitFallback(t *testing.T) {
 		writeFile(t, filepath.Join(home, ".gitconfig"), "[url \"a\"]\n\tinsteadOf = b\n")
 
 		dir := localScope(t, cleanConfig)
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true for an insteadOf in ~/.gitconfig")
 		}
 	})
@@ -1224,7 +1248,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "extra"), "[user]\n\temail = a@b\n")
 		dir := setup(t, home, "[include]\n\tpath = extra\n")
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false: the included file changes nothing")
 		}
 	})
@@ -1233,7 +1257,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "extra"), "[url \"a\"]\n\tinsteadOf = b\n")
 		dir := setup(t, home, "[include]\n\tpath = extra\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: the included file rewrites URLs")
 		}
 	})
@@ -1242,7 +1266,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "extra"), "[remote \"origin\"]\n\turl = https://x/y.git\n")
 		dir := setup(t, home, "[include]\n\tpath = extra\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: the included file defines the remote")
 		}
 	})
@@ -1252,7 +1276,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		writeFile(t, filepath.Join(home, "mid"), "[include]\n\tpath = deep\n")
 		writeFile(t, filepath.Join(home, "deep"), "[url \"a\"]\n\tinsteadOf = b\n")
 		dir := setup(t, home, "[include]\n\tpath = mid\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: the insteadOf is two includes down")
 		}
 	})
@@ -1261,7 +1285,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "tilde"), "[url \"a\"]\n\tinsteadOf = b\n")
 		dir := setup(t, home, "[include]\n\tpath = ~/tilde\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: ~/tilde holds an insteadOf")
 		}
 	})
@@ -1270,7 +1294,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "loop"), "[include]\n\tpath = "+filepath.Join(home, ".gitconfig")+"\n")
 		dir := setup(t, home, "[include]\n\tpath = loop\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: git aborts on a cycle")
 		}
 	})
@@ -1278,7 +1302,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 	t.Run("a missing include target changes nothing", func(t *testing.T) {
 		home := t.TempDir()
 		dir := setup(t, home, "[include]\n\tpath = /nowhere/at/all\n")
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false: git ignores a missing include")
 		}
 	})
@@ -1287,7 +1311,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "extra"), "[url \"a\"]\n\tinsteadOf = b\n")
 		dir := setup(t, home, "[include \"x\"]\n\tpath = extra\n")
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false: [include \"x\"] is not an include")
 		}
 	})
@@ -1296,7 +1320,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, "extra"), "[url \"a\"]\n\tinsteadOf = b\n")
 		dir := setup(t, home, "[includeIf \"nosuchcond:x\"]\n\tpath = extra\n")
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false: git never applies an unknown condition")
 		}
 	})
@@ -1309,7 +1333,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		writeFile(t, filepath.Join(home, "work"), "[url \"a\"]\n\tinsteadOf = b\n")
 		elsewhere := mkdirAll(t, filepath.Join(home, "elsewhere"))
 		dir := setup(t, home, "[includeIf \"gitdir:"+elsewhere+"/\"]\n\tpath = work\n")
-		if needsGitFallback(dir, dir, "origin") {
+		if needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = true, want false: the condition cannot match this gitdir")
 		}
 	})
@@ -1326,7 +1350,7 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 		// trailing separator that makes git append its implicit "**".
 		writeFile(t, filepath.Join(home, ".gitconfig"),
 			"[includeIf \"gitdir:"+filepath.Dir(realPath(t, dir))+"/\"]\n\tpath = work\n")
-		if !needsGitFallback(dir, dir, "origin") {
+		if !needsGitFallback(dir, dir, "origin", "") {
 			t.Error("needsGitFallback() = false, want true: the condition matches this gitdir")
 		}
 	})
@@ -1339,12 +1363,12 @@ func TestNeedsGitFallback_Includes(t *testing.T) {
 				home := t.TempDir()
 				writeFile(t, filepath.Join(home, "harmless"), "[user]\n\temail = a@b\n")
 				dir := setup(t, home, "[includeIf \""+cond+"\"]\n\tpath = harmless\n")
-				if needsGitFallback(dir, dir, "origin") {
+				if needsGitFallback(dir, dir, "origin", "") {
 					t.Errorf("needsGitFallback() = true, want false for %q with a harmless target", cond)
 				}
 
 				writeFile(t, filepath.Join(home, "harmless"), "[url \"a\"]\n\tinsteadOf = b\n")
-				if !needsGitFallback(dir, dir, "origin") {
+				if !needsGitFallback(dir, dir, "origin", "") {
 					t.Errorf("needsGitFallback() = false, want true for %q with an insteadOf target", cond)
 				}
 			})
@@ -1472,12 +1496,21 @@ func TestReadRepoContextFromDisk(t *testing.T) {
 
 	// The fast path must not answer when something in scope could rewrite the
 	// URL, even though the repository itself is perfectly ordinary.
-	t.Run("an insteadOf in scope sends the caller to git", func(t *testing.T) {
+	t.Run("an insteadOf matching the remote sends the caller to git", func(t *testing.T) {
+		pinConfigScope(t)
+		t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t,
+			"[url \"https://github.com/\"]\n\tinsteadOf = git@github.com:\n"))
+		if _, err := readRepoContextFromDisk(root, "origin"); err == nil {
+			t.Error("expected an error when a matching insteadOf is configured")
+		}
+	})
+
+	t.Run("an insteadOf for another prefix keeps the fast path", func(t *testing.T) {
 		pinConfigScope(t)
 		t.Setenv("GIT_CONFIG_GLOBAL", writeConfig(t,
 			"[url \"git@github.com:\"]\n\tinsteadOf = https://github.com/\n"))
-		if _, err := readRepoContextFromDisk(root, "origin"); err == nil {
-			t.Error("expected an error when insteadOf is configured")
+		if _, err := readRepoContextFromDisk(root, "origin"); err != nil {
+			t.Errorf("unexpected error for an insteadOf that cannot match: %v", err)
 		}
 	})
 }
@@ -2065,6 +2098,71 @@ func TestDifferential_FastPathMatchesGit(t *testing.T) {
 						"[url \"https://gitlab.com/mirror/\"]\n\tinsteadOf = https://github.com/example/\n")
 					return "[include]\n\tpath = ~/rewrite\n"
 				})
+			},
+		},
+		// --- insteadOf prefix matching ---
+		//
+		// A rewrite only disqualifies the fast path when its prefix can match
+		// the remote URL, so a corporate rule for another host stays cheap.
+		{
+			name:   "global insteadOf for another host",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfig(t, func(string) string {
+					return "[url \"https://gitlab.com/mirror/\"]\n\tinsteadOf = git@gitlab.com:other/\n"
+				})
+			},
+		},
+		{
+			name:   "global pushInsteadOf for another host",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfig(t, func(string) string {
+					return "[url \"https://gitlab.com/mirror/\"]\n\tpushInsteadOf = git@gitlab.com:other/\n"
+				})
+			},
+		},
+		{
+			// pushInsteadOf never changes what `remote get-url` prints, but the
+			// scan still refuses on a match: a lost fork, never a wrong URL.
+			name:      "global pushInsteadOf matching the remote",
+			remote:    "origin",
+			fallsBack: true,
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfig(t, func(string) string {
+					return "[url \"https://gitlab.com/mirror/\"]\n\tpushInsteadOf = https://github.com/example/\n"
+				})
+			},
+		},
+		{
+			name:       "global insteadOf whose prefix is the whole remote URL",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				return repoWithGlobalConfig(t, func(string) string {
+					return "[url \"https://gitlab.com/mirror/repo.git\"]\n\tinsteadOf = https://github.com/example/repo.git\n"
+				})
+			},
+		},
+		{
+			name:       "local insteadOf matching the remote",
+			remote:     "origin",
+			fallsBack:  true,
+			wantGitURL: "https://gitlab.com/mirror/repo",
+			build: func(t *testing.T) string {
+				root := repoWithGlobalConfig(t, func(string) string { return "" })
+				runGit(t, root, "config", "url.https://gitlab.com/mirror/.insteadOf", "https://github.com/example/")
+				return root
+			},
+		},
+		{
+			name:   "local insteadOf for another host",
+			remote: "origin",
+			build: func(t *testing.T) string {
+				root := repoWithGlobalConfig(t, func(string) string { return "" })
+				runGit(t, root, "config", "url.https://gitlab.com/mirror/.insteadOf", "https://github.com/other/")
+				return root
 			},
 		},
 		{
