@@ -51,9 +51,11 @@
       "semanticCommitType": "chore"
     },
     {
-      "description": "Go toolchain updates",
+      "description": "Go toolchain updates. Both depTypes are needed: golang is the go directive, which Renovate leaves alone unless rangeStrategy bump unlocks it, toolchain is the toolchain directive, which it bumps by default",
       "matchManagers": ["gomod"],
-      "matchDepTypes": ["golang"],
+      "matchDepTypes": ["golang", "toolchain"],
+      "matchDepNames": ["go"],
+      "rangeStrategy": "bump",
       "groupName": "go-toolchain"
     }
   ],
